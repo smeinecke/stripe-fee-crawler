@@ -125,17 +125,16 @@ def test_staging_dir_inside_output_dir(tmp_path: Path) -> None:
 
 
 def test_publish_change_report_writes_changes(tmp_path: Path) -> None:
+    from stripe_fee_crawler.models import ChangeType
+
     publisher = OutputPublisher(tmp_path, timestamp=None)
     output = _minimal_output("DE")
     _, staging = publisher.publish([output], [output.market], [], [])
     report = ChangeReport(
         schema_version=1,
-        changes=[],
+        changes=[ChangeType(kind="new_market", country_code="DE", message="new")],
         has_regression=False,
     )
-    report.changes = [
-        {"kind": "new_market", "country_code": "DE", "message": "new"}  # type: ignore[assignment]
-    ]
     publisher.publish_change_report(staging, report)
     assert (staging / "change-report.json").exists()
     data = json.loads((staging / "change-report.json").read_text())
@@ -168,9 +167,6 @@ def test_commit_rolls_back_live_on_validation_failure(tmp_path: Path) -> None:
     publisher.commit(staging, validate=False)
     original_de = (tmp_path / "json" / "DE.json").read_text()
 
-    # Mutate the live DE.json so we can verify rollback restores it.
-    (tmp_path / "json" / "DE.json").write_text("{}", encoding="utf-8")
-
     publisher2 = OutputPublisher(tmp_path, timestamp=None)
     output2 = _minimal_output("US")
     _, staging2 = publisher2.publish([output2], [output2.market], [], [])
@@ -181,10 +177,13 @@ def test_commit_rolls_back_live_on_validation_failure(tmp_path: Path) -> None:
             return {"errors": ["live validation failed"]}
         return {"errors": []}
 
-    with mock.patch("stripe_fee_crawler.output.validate_all_output", side_effect=_fake_validate):
-        with pytest.raises(CrawlerValidationError):
-            publisher2.commit(staging2, validate=True)
+    with (
+        mock.patch("stripe_fee_crawler.output.validate_all_output", side_effect=_fake_validate),
+        pytest.raises(CrawlerValidationError),
+    ):
+        publisher2.commit(staging2, validate=True)
 
-    # Live path should be restored to original and staging cleaned up.
+    # Backup should restore the original json/ tree and staging should be cleaned up.
     assert (tmp_path / "json" / "DE.json").read_text() == original_de
+    assert not (tmp_path / "json" / "US.json").exists()
     assert not staging2.exists()
