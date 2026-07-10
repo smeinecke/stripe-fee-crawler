@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smeinecke/stripe-fee-data/schemas/payment-methods-v1.schema.json",
+  "title": "Stripe payment method catalog",
+  "description": "Cross-market payment method catalog with fee rule references.",
+  "type": "object",
+  "required": ["schema_version", "methods"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "generated_at": { "type": ["string", "null"] },
+    "methods": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["method_id", "family", "display_name", "supported_account_countries", "fee_rule_refs", "source_refs"],
+        "properties": {
+          "method_id": { "type": "string" },
+          "family": { "type": "string" },
+          "display_name": { "type": "string" },
+          "localized_names": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["language", "name"],
+              "properties": {
+                "language": { "type": "string" },
+                "name": { "type": "string" }
+              }
+            }
+          },
+          "supported_account_countries": { "type": "array", "items": { "type": "string", "pattern": "^[A-Z]{2}$" } },
+          "fee_rule_refs": { "type": "array", "items": { "type": "string" } },
+          "source_refs": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

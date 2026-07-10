@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smeinecke/stripe-fee-data/schemas/manifest-v1.schema.json",
+  "title": "Stripe market manifest",
+  "description": "Discovered, supported, unsupported, and transient-failure markets.",
+  "type": "object",
+  "required": ["schema_version", "markets", "unsupported", "aliases", "fee_page_urls", "transient_failures"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "generated_at": { "type": ["string", "null"] },
+    "markets": { "type": "array", "items": { "type": "object" } },
+    "unsupported": { "type": "array", "items": { "type": "object" } },
+    "aliases": { "type": "object", "additionalProperties": { "type": "string" } },
+    "fee_page_urls": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "string" } } },
+    "transient_failures": { "type": "array", "items": { "type": "object" } }
+  }
+}

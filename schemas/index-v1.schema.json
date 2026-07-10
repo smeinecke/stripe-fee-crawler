@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smeinecke/stripe-fee-data/schemas/index-v1.schema.json",
+  "title": "Stripe fee data index",
+  "description": "Index of published per-market fee data files.",
+  "type": "object",
+  "required": ["schema_version", "markets"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "generated_at": { "type": ["string", "null"] },
+    "markets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["account_country", "stripe_market_code", "locale", "data_path"],
+        "properties": {
+          "account_country": { "type": "string", "pattern": "^[A-Z]{2}$" },
+          "stripe_market_code": { "type": "string" },
+          "locale": { "type": "string" },
+          "data_path": { "type": "string" },
+          "source_urls": { "type": "array", "items": { "type": "string", "format": "uri" } },
+          "source_updated_at": { "type": ["string", "null"] },
+          "derivation_status": { "type": ["string", "null"] },
+          "content_sha256": { "type": ["string", "null"] },
+          "schema_version": { "type": "integer" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/smeinecke/stripe-fee-data/schemas/core-fees-v1.schema.json",
+  "title": "Stripe core fees",
+  "description": "Consolidated calculation-ready fee rules across all supported Stripe markets.",
+  "type": "object",
+  "required": ["schema_version", "markets"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "generated_at": { "type": ["string", "null"] },
+    "markets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["account_country", "stripe_market_code", "locale", "derivation_status", "rules"],
+        "properties": {
+          "account_country": { "type": "string", "pattern": "^[A-Z]{2}$" },
+          "stripe_market_code": { "type": "string" },
+          "locale": { "type": "string" },
+          "derivation_status": { "type": "string", "enum": ["complete", "partial", "unclassified", "failed"] },
+          "rules": { "type": "array", "items": { "type": "object" } },
+          "unclassified_count": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}
