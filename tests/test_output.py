@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
-from stripe_fee_crawler.models import Market, MarketOutput, Source
+import pytest
+
+from stripe_fee_crawler.exceptions import ValidationError as CrawlerValidationError
+from stripe_fee_crawler.models import ChangeReport, Market, MarketOutput, Source
 from stripe_fee_crawler.output import OutputPublisher
 
 
@@ -108,3 +113,78 @@ def test_commit_detects_changes(tmp_path: Path) -> None:
     assert changed
     assert any("US.json" in f for f in changed_files)
     assert not (tmp_path / "json" / "DE.json").exists()
+
+
+def test_staging_dir_inside_output_dir(tmp_path: Path) -> None:
+    staging_dir = tmp_path / ".staging"
+    publisher = OutputPublisher(tmp_path, staging_dir=staging_dir, timestamp=None)
+    output = _minimal_output("DE")
+    _, staging = publisher.publish([output], [output.market], [], [])
+    assert staging == staging_dir
+    assert (staging / "json" / "DE.json").exists()
+
+
+def test_publish_change_report_writes_changes(tmp_path: Path) -> None:
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    output = _minimal_output("DE")
+    _, staging = publisher.publish([output], [output.market], [], [])
+    report = ChangeReport(
+        schema_version=1,
+        changes=[],
+        has_regression=False,
+    )
+    report.changes = [
+        {"kind": "new_market", "country_code": "DE", "message": "new"}  # type: ignore[assignment]
+    ]
+    publisher.publish_change_report(staging, report)
+    assert (staging / "change-report.json").exists()
+    data = json.loads((staging / "change-report.json").read_text())
+    assert data["has_regression"] is False
+    assert len(data["changes"]) == 1
+
+
+def test_publish_change_report_carries_forward(tmp_path: Path) -> None:
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    output = _minimal_output("DE")
+    _, staging = publisher.publish([output], [output.market], [], [])
+    publisher.commit(staging, validate=False)
+
+    # Write an existing change-report and verify it is carried forward unchanged.
+    old_report = {"schema_version": 1, "changes": [], "has_regression": False}
+    (tmp_path / "change-report.json").write_text(json.dumps(old_report), encoding="utf-8")
+
+    publisher2 = OutputPublisher(tmp_path, timestamp=None)
+    _, staging2 = publisher2.publish([output], [output.market], [], [])
+    publisher2.publish_change_report(staging2, ChangeReport())
+    assert (staging2 / "change-report.json").exists()
+    data = json.loads((staging2 / "change-report.json").read_text())
+    assert data["changes"] == []
+
+
+def test_commit_rolls_back_live_on_validation_failure(tmp_path: Path) -> None:
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    output = _minimal_output("DE")
+    _, staging = publisher.publish([output], [output.market], [], [])
+    publisher.commit(staging, validate=False)
+    original_de = (tmp_path / "json" / "DE.json").read_text()
+
+    # Mutate the live DE.json so we can verify rollback restores it.
+    (tmp_path / "json" / "DE.json").write_text("{}", encoding="utf-8")
+
+    publisher2 = OutputPublisher(tmp_path, timestamp=None)
+    output2 = _minimal_output("US")
+    _, staging2 = publisher2.publish([output2], [output2.market], [], [])
+
+    def _fake_validate(path: Path, strict: bool = False) -> dict[str, Any]:
+        # Fail validation only when checking the live (post-rename) output dir.
+        if ".staging" not in str(path):
+            return {"errors": ["live validation failed"]}
+        return {"errors": []}
+
+    with mock.patch("stripe_fee_crawler.output.validate_all_output", side_effect=_fake_validate):
+        with pytest.raises(CrawlerValidationError):
+            publisher2.commit(staging2, validate=True)
+
+    # Live path should be restored to original and staging cleaned up.
+    assert (tmp_path / "json" / "DE.json").read_text() == original_de
+    assert not staging2.exists()

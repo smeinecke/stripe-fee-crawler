@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
 
 import click
 
@@ -166,6 +167,7 @@ async def _crawl_market(
 @click.option("--request-delay", default=1.0, type=float)
 @click.option("--source-timestamp", default=None)
 @click.option("--allow-partial", is_flag=True)
+@click.option("--report", type=click.Path(), help="Write machine-readable JSON report to this path.")
 @click.pass_context
 def crawl_cmd(
     ctx: click.Context,
@@ -179,6 +181,7 @@ def crawl_cmd(
     request_delay: float,
     source_timestamp: str | None,
     allow_partial: bool,
+    report: str | None,
 ) -> None:
     """Crawl all markets and publish to the data repository."""
     config = _config_from_options(
@@ -191,7 +194,7 @@ def crawl_cmd(
         allow_partial=allow_partial,
         source_timestamp=source_timestamp,
     )
-    asyncio.run(_crawl_all(ctx, config, output, atomic, fail_on_regression))
+    asyncio.run(_crawl_all(ctx, config, output, atomic, fail_on_regression, report))
 
 
 async def _crawl_all(
@@ -200,19 +203,23 @@ async def _crawl_all(
     output_dir: str,
     atomic: bool,
     fail_on_regression: bool,
+    report: str | None = None,
 ) -> None:
     async with StripeCrawler(config) as crawler:
         outputs, unsupported = await crawler.crawl_all()
-        report = await crawler.publish(
+        report_obj = await crawler.publish(
             outputs,
             unsupported,
             output_dir,
             atomic=atomic,
             fail_on_regression=fail_on_regression,
         )
-    click.echo(json.dumps(report.model_dump(), indent=2, ensure_ascii=False))
-    if report.exit_code != 0:
-        sys.exit(report.exit_code)
+    report_text = json.dumps(report_obj.model_dump(), indent=2, ensure_ascii=False)
+    click.echo(report_text)
+    if report:
+        Path(report).write_text(report_text + "\n", encoding="utf-8")
+    if report_obj.exit_code != 0:
+        sys.exit(report_obj.exit_code)
 
 
 @main.command(name="validate")
