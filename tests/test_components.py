@@ -33,11 +33,7 @@ def test_extract_sections_us(us_pricing_html: str) -> None:
 
 def test_split_section_body(de_pricing_html: str) -> None:
     sections = extract_sections(de_pricing_html, "https://stripe.com/en-de/pricing", page_kind="pricing")
-    all_entries = [
-        (phrase, tokens)
-        for s in sections
-        for phrase, tokens in split_section_body_into_entries(s)
-    ]
+    all_entries = [(phrase, tokens) for s in sections for phrase, tokens in split_section_body_into_entries(s)]
     assert any("1,5%" in phrase for phrase, _ in all_entries)
 
 

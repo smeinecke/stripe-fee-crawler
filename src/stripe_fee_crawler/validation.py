@@ -221,8 +221,7 @@ def _validate_rule_percentage_consistency(rule: FeeRule, market_code: str, error
     try:
         if Decimal(rule.basis_points) != Decimal(rule.percentage) * Decimal("100"):
             errors.append(
-                f"{market_code}/{rule.rule_id}: basis_points {rule.basis_points} != "
-                f"percentage {rule.percentage} * 100"
+                f"{market_code}/{rule.rule_id}: basis_points {rule.basis_points} != percentage {rule.percentage} * 100"
             )
     except Exception as exc:
         errors.append(f"{market_code}/{rule.rule_id}: percentage/basis_points comparison failed: {exc}")

@@ -194,7 +194,9 @@ def test_semantic_validation_passes() -> None:
         ]
     )
     manifest = MarketManifest(markets=[market])
-    payment_methods = PaymentMethodCatalog(methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")])
+    payment_methods = PaymentMethodCatalog(
+        methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")]
+    )
     result = validate_semantic("/unused", core_fees=core_fees, manifest=manifest, payment_methods=payment_methods)
     assert result["success"]
 
@@ -241,7 +243,9 @@ def test_semantic_validation_fails_bad_currency_exponent() -> None:
         ]
     )
     manifest = MarketManifest(markets=[market])
-    payment_methods = PaymentMethodCatalog(methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")])
+    payment_methods = PaymentMethodCatalog(
+        methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")]
+    )
     with pytest.raises(CrawlerValidationError) as excinfo:
         validate_semantic("/unused", core_fees=core_fees, manifest=manifest, payment_methods=payment_methods)
     assert "exponent" in str(excinfo.value).lower()
@@ -261,7 +265,9 @@ def test_semantic_validation_fails_missing_market() -> None:
         ]
     )
     manifest = MarketManifest(markets=[])
-    payment_methods = PaymentMethodCatalog(methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")])
+    payment_methods = PaymentMethodCatalog(
+        methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")]
+    )
     with pytest.raises(CrawlerValidationError) as excinfo:
         validate_semantic("/unused", core_fees=core_fees, manifest=manifest, payment_methods=payment_methods)
     assert "manifest" in str(excinfo.value).lower()

@@ -95,9 +95,7 @@ class StripeCrawler:
 
         try:
             pricing_url, payment_methods_url = await discover_fee_pages(self.http_client, market, self.config)
-            self.fee_page_urls[market.stripe_market_code] = [
-                u for u in [pricing_url, payment_methods_url] if u
-            ]
+            self.fee_page_urls[market.stripe_market_code] = [u for u in [pricing_url, payment_methods_url] if u]
         except UnsupportedMarketError as exc:
             return MarketOutput(
                 market=market,
