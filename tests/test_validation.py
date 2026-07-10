@@ -59,7 +59,9 @@ def test_validate_all_output(tmp_path: Path) -> None:
 
 def test_validate_all_output_fails_on_invalid(tmp_path: Path) -> None:
     (tmp_path / "json").mkdir(parents=True)
-    (tmp_path / "json" / "DE.json").write_text('{"schema_version": 1, "market": {}, "sources": [], "entries": [], "derived_rules": [], "unclassified_entries": [], "warnings": [], "derivation_status": "invalid"}')
+    (tmp_path / "json" / "DE.json").write_text(
+        '{"schema_version": 1, "market": {}, "sources": [], "entries": [], "derived_rules": [], "unclassified_entries": [], "warnings": [], "derivation_status": "invalid"}'
+    )
     with pytest.raises(CrawlerValidationError):
         validate_all_output(tmp_path)
 

@@ -83,9 +83,7 @@ def _build_section_tree(
         # Update all stacked sections with the new body text.
         new_stack: list[tuple[int, Section]] = []
         for level, section in stack:
-            updated = section.model_copy(
-                update={"body": f"{section.body}\n{body_text}" if section.body else body_text}
-            )
+            updated = section.model_copy(update={"body": f"{section.body}\n{body_text}" if section.body else body_text})
             for i, s in enumerate(sections):
                 if s.section_id == updated.section_id:
                     sections[i] = updated
@@ -210,7 +208,9 @@ def split_section_body_into_entries(section: Section) -> list[tuple[str, list[Fe
     lines = [line for line in raw_lines if line]
 
     merged: list[str] = []
-    qualifier_pattern = re.compile(r"^(for|if|per|starting at|up to|minimum|maximum|cap|capped|custom|contact sales)", re.IGNORECASE)
+    qualifier_pattern = re.compile(
+        r"^(for|if|per|starting at|up to|minimum|maximum|cap|capped|custom|contact sales)", re.IGNORECASE
+    )
     fee_pattern = re.compile(r"[0-9]\s*%|[0-9]\s*[€£$¥A-Z]|included|free")
 
     for line in lines:

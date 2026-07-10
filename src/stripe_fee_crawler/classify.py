@@ -133,7 +133,11 @@ def _build_conditions(entry: PricingEntry, parsed: dict[str, Any]) -> list[FeeCo
     evidence = (entry.source_evidence or "").lower()
     path = " ".join(p.lower() for p in entry.section_path)
 
-    if "currency conversion" in phrase or "if currency conversion is required" in phrase or "currency conversion" in evidence:
+    if (
+        "currency conversion" in phrase
+        or "if currency conversion is required" in phrase
+        or "currency conversion" in evidence
+    ):
         conditions.append(FeeCondition(dimension="currency_conversion_required", value=True))
     if "standard settlement" in phrase:
         conditions.append(FeeCondition(dimension="settlement_timing", value="standard"))
@@ -182,9 +186,9 @@ def _classify_entry(entry: PricingEntry) -> FeeRule | None:
     payment_method = entry.payment_method or ("card" if fee_category == "card_payment" else None)
 
     # Extract common condition flags from the conditions list for convenience.
-    currency_conversion_required = any(
-        c.dimension == "currency_conversion_required" and c.value for c in conditions
-    ) or None
+    currency_conversion_required = (
+        any(c.dimension == "currency_conversion_required" and c.value for c in conditions) or None
+    )
     recurring = next((c.value for c in conditions if c.dimension == "recurring" and isinstance(c.value, bool)), None)
 
     # Avoid classifying vague phrases without clear numeric values unless they are free/included.

@@ -280,9 +280,7 @@ def _extract_footer_markets(tree: Any) -> list[Market]:
 
     # The footer selector is a list of country links grouped by region.
     # Each link text is a country name and href contains the locale.
-    links = tree.xpath(
-        "//footer//a[contains(@href, 'stripe.com') or contains(@href, '/')]"
-    )
+    links = tree.xpath("//footer//a[contains(@href, 'stripe.com') or contains(@href, '/')]")
     for link in links:
         href = link.get("href", "")
         text = " ".join(link.itertext()).strip()
