@@ -203,7 +203,7 @@ CURRENCY_BY_COUNTRY: dict[str, str] = {
     "CA": "CAD",
     "HR": "EUR",
     "CY": "EUR",
-    "CZ": "EUR",
+    "CZ": "CZK",
     "DK": "DKK",
     "EE": "EUR",
     "FI": "EUR",
@@ -212,7 +212,7 @@ CURRENCY_BY_COUNTRY: dict[str, str] = {
     "GI": "GBP",
     "GR": "EUR",
     "HK": "HKD",
-    "HU": "EUR",
+    "HU": "HUF",
     "IN": "INR",
     "ID": "IDR",
     "IE": "EUR",
@@ -273,10 +273,25 @@ def _is_html_response(response: HttpResponse) -> bool:
     return "text/html" in content_type or "application/xhtml" in content_type
 
 
-def _extract_footer_markets(tree: Any) -> list[Market]:
-    """Discover markets from the country selector in the page footer."""
+def _canonical_market_code(iso_code: str, _language: str = "en") -> str:
+    """Return the canonical Stripe market code (country code) for a market.
+
+    The canonical code is the lower-case ISO 3166-1 alpha-2 account country.
+    Locale variants (e.g. ``en-de`` and ``de-de``) are recorded as aliases.
+    """
+    return iso_code.lower()
+
+
+def _extract_footer_markets(tree: Any) -> tuple[list[Market], dict[str, str]]:
+    """Discover markets from the country selector in the page footer.
+
+    Returns (markets, aliases) where aliases maps discovered locale slugs to the
+    canonical stripe_market_code. Deduplication is by account country so that
+    multiple language links for the same country collapse into one market.
+    """
     markets: list[Market] = []
-    seen: set[str] = set()
+    aliases: dict[str, str] = {}
+    seen_countries: set[str] = set()
 
     # The footer selector is a list of country links grouped by region.
     # Each link text is a country name and href contains the locale.
@@ -299,31 +314,40 @@ def _extract_footer_markets(tree: Any) -> list[Market]:
             if not match:
                 continue
             locale = match.group("locale")
-        if locale in seen:
-            continue
         country_name = text
         iso_code = _country_name_to_iso(country_name)
         if not iso_code:
             continue
-        seen.add(locale)
+
+        canonical_code = _canonical_market_code(iso_code, locale.split("-")[0])
+        if iso_code in seen_countries:
+            # Record the alternate locale as an alias for the canonical market.
+            if locale != canonical_code:
+                aliases[locale] = canonical_code
+            continue
+        seen_countries.add(iso_code)
+        if locale != canonical_code:
+            aliases[locale] = canonical_code
+
+        url_prefix = f"https://stripe.com/{locale}"
         markets.append(
             Market(
-                stripe_market_code=locale,
+                stripe_market_code=canonical_code,
                 account_country=iso_code,
                 country_name=country_name,
                 region=None,
                 locale=locale,
                 languages=[Language(code=locale.split("-")[0], name=None)],
-                url_prefix=f"https://stripe.com/{locale}",
+                url_prefix=url_prefix,
                 preferred_language=locale.split("-")[0],
                 default_currency=CURRENCY_BY_COUNTRY.get(iso_code),
                 status="discovered",
             )
         )
-    return markets
+    return markets, aliases
 
 
-def _extract_footer_markets_from_text(html_text: str) -> list[Market]:
+def _extract_footer_markets_from_text(html_text: str) -> tuple[list[Market], dict[str, str]]:
     """Discover markets from the footer country list using robust text matching."""
     tree = html.fromstring(html_text)
     return _extract_footer_markets(tree)
@@ -334,37 +358,47 @@ def get_bootstrap_markets() -> list[Market]:
     return [market.model_copy() for market in BOOTSTRAP_MARKETS]
 
 
+def _bootstrap_aliases() -> dict[str, str]:
+    """Return locale aliases implied by the bootstrap market list."""
+    aliases: dict[str, str] = {}
+    for market in BOOTSTRAP_MARKETS:
+        canonical = market.stripe_market_code
+        if market.locale != canonical:
+            aliases[market.locale] = canonical
+    return aliases
+
+
 async def discover_markets(
     http_client: HttpClient,
     config: CrawlConfiguration,
     discovery_url: str = "https://stripe.com/pricing/local-payment-methods",
-) -> list[Market]:
+) -> tuple[list[Market], dict[str, str]]:
     """Discover Stripe markets from the country selector in a pricing page footer.
 
-    Falls back to the bootstrap list when dynamic discovery fails and the caller
-    has not disabled the fallback.
+    Returns (markets, aliases). Falls back to the bootstrap list when dynamic
+    discovery fails and the caller has not disabled the fallback.
     """
     try:
         response = await http_client.get(discovery_url)
     except (NetworkError, ParserError) as exc:
         logger.warning("Market discovery request failed: %s", exc)
         if not config.refresh_market_manifest:
-            return get_bootstrap_markets()
+            return get_bootstrap_markets(), _bootstrap_aliases()
         raise MarketDiscoveryError(f"Failed to retrieve Stripe discovery page: {exc}") from exc
 
     try:
-        markets = _extract_footer_markets_from_text(response.text)
+        markets, aliases = _extract_footer_markets_from_text(response.text)
     except Exception as exc:
         logger.warning("Could not extract markets from discovery page: %s", exc)
         if not config.refresh_market_manifest:
-            return get_bootstrap_markets()
+            return get_bootstrap_markets(), _bootstrap_aliases()
         raise MarketDiscoveryError(f"Could not extract markets from discovery page: {exc}") from exc
 
     if markets:
-        return markets
+        return markets, aliases
 
     if not config.refresh_market_manifest:
-        return get_bootstrap_markets()
+        return get_bootstrap_markets(), _bootstrap_aliases()
     raise MarketDiscoveryError("No markets found in discovery page footer")
 
 

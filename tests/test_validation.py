@@ -3,11 +3,22 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from stripe_fee_crawler.exceptions import ValidationError as CrawlerValidationError
-from stripe_fee_crawler.models import Market, MarketOutput, Source
+from stripe_fee_crawler.models import (
+    CoreFeeEntry,
+    CoreFees,
+    FeeRule,
+    Market,
+    MarketManifest,
+    MarketOutput,
+    PaymentMethodCatalog,
+    PaymentMethodEntry,
+    Source,
+)
 from stripe_fee_crawler.output import OutputPublisher
 from stripe_fee_crawler.validation import (
     generate_core_fees_schema,
@@ -20,6 +31,7 @@ from stripe_fee_crawler.validation import (
     validate_manifest,
     validate_market_output,
     validate_payment_methods,
+    validate_semantic,
 )
 
 
@@ -134,3 +146,122 @@ def test_generated_schemas_have_id(generator, schema_id: str) -> None:
     schema = generator()
     assert "$id" in schema
     assert schema_id in schema["$id"]
+
+
+def _valid_rule(**overrides: Any) -> FeeRule:
+    return FeeRule(
+        rule_id="r1",
+        entry_id="e1",
+        name="card_payment",
+        provider="stripe",
+        channel="online",
+        payment_method="card",
+        percentage="1.5",
+        basis_points="150",
+        fixed_amount="0.25",
+        fixed_amount_minor="25",
+        fixed_currency="EUR",
+        unit="per_transaction",
+        exactness="exact",
+        behavior="conditional",
+        source_text="1.5% + €0.25",
+        source_url="https://stripe.com/pricing",
+        classification_status="classified",
+        confidence=0.85,
+        **overrides,
+    )
+
+
+def test_semantic_validation_passes() -> None:
+    market = Market(
+        stripe_market_code="de",
+        account_country="DE",
+        country_name="Germany",
+        locale="en-de",
+        url_prefix="https://stripe.com/en-de",
+        status="supported",
+    )
+    rule = _valid_rule()
+    core_fees = CoreFees(
+        markets=[
+            CoreFeeEntry(
+                account_country="DE",
+                stripe_market_code="de",
+                locale="en-de",
+                derivation_status="complete",
+                rules=[rule],
+            )
+        ]
+    )
+    manifest = MarketManifest(markets=[market])
+    payment_methods = PaymentMethodCatalog(methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")])
+    result = validate_semantic("/unused", core_fees=core_fees, manifest=manifest, payment_methods=payment_methods)
+    assert result["success"]
+
+
+def test_semantic_validation_fails_bad_currency_exponent() -> None:
+    market = Market(
+        stripe_market_code="de",
+        account_country="DE",
+        country_name="Germany",
+        locale="en-de",
+        url_prefix="https://stripe.com/en-de",
+        status="supported",
+    )
+    # JPY has exponent 0, so 1.0 JPY should be minor=1, not 100.
+    rule = FeeRule(
+        rule_id="r1",
+        entry_id="e1",
+        name="card_payment",
+        provider="stripe",
+        channel="online",
+        payment_method="card",
+        percentage="1.5",
+        basis_points="150",
+        fixed_amount="1.0",
+        fixed_amount_minor="100",
+        fixed_currency="JPY",
+        unit="per_transaction",
+        exactness="exact",
+        behavior="conditional",
+        source_text="1.5% + ¥1",
+        source_url="https://stripe.com/pricing",
+        classification_status="classified",
+        confidence=0.85,
+    )
+    core_fees = CoreFees(
+        markets=[
+            CoreFeeEntry(
+                account_country="DE",
+                stripe_market_code="de",
+                locale="en-de",
+                derivation_status="complete",
+                rules=[rule],
+            )
+        ]
+    )
+    manifest = MarketManifest(markets=[market])
+    payment_methods = PaymentMethodCatalog(methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")])
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic("/unused", core_fees=core_fees, manifest=manifest, payment_methods=payment_methods)
+    assert "exponent" in str(excinfo.value).lower()
+
+
+def test_semantic_validation_fails_missing_market() -> None:
+    rule = _valid_rule()
+    core_fees = CoreFees(
+        markets=[
+            CoreFeeEntry(
+                account_country="XX",
+                stripe_market_code="xx",
+                locale="en-xx",
+                derivation_status="complete",
+                rules=[rule],
+            )
+        ]
+    )
+    manifest = MarketManifest(markets=[])
+    payment_methods = PaymentMethodCatalog(methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")])
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic("/unused", core_fees=core_fees, manifest=manifest, payment_methods=payment_methods)
+    assert "manifest" in str(excinfo.value).lower()

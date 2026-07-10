@@ -38,7 +38,10 @@ def _build_section_tree(
     """Build a deterministic section tree from heading hierarchy.
 
     This collects all headings in source order and groups subsequent content
-    under the nearest preceding heading of higher or equal level.
+    under the nearest preceding heading of higher or equal level. Body text is
+    collected from each element's own ``text`` and ``tail`` only, not from
+    descendants, so parent containers and child elements never contribute the
+    same content twice.
     """
     sections: list[Section] = []
     stack: list[tuple[int, Section]] = []
@@ -73,23 +76,29 @@ def _build_section_tree(
             stack.append((level, section))
             continue
 
-        # Collect body text for all sections currently on the stack.
-        body_text = clean_fee_text(extract_text(element))
+        # Collect only this element's direct text and tail. Descendant text will
+        # be handled when those descendant elements are visited, so each visible
+        # text node has exactly one canonical source section.
+        text_parts: list[str] = []
+        if element.text:
+            text_parts.append(element.text)
+        if element.tail:
+            text_parts.append(element.tail)
+        body_text = clean_fee_text("".join(text_parts))
         if not body_text or not stack:
             continue
-        for _level, section in stack:
-            if section.heading and body_text == section.heading:
-                continue
-        # Update all stacked sections with the new body text.
-        new_stack: list[tuple[int, Section]] = []
-        for level, section in stack:
-            updated = section.model_copy(update={"body": f"{section.body}\n{body_text}" if section.body else body_text})
-            for i, s in enumerate(sections):
-                if s.section_id == updated.section_id:
-                    sections[i] = updated
-                    break
-            new_stack.append((level, updated))
-        stack = new_stack
+        if any(section.heading and body_text == section.heading for _, section in stack):
+            continue
+
+        # Assign the fragment to the deepest (most specific) open section.
+        deepest_level, deepest_section = stack[-1]
+        updated_body = f"{deepest_section.body}\n{body_text}" if deepest_section.body else body_text
+        updated = deepest_section.model_copy(update={"body": updated_body})
+        for i, s in enumerate(sections):
+            if s.section_id == updated.section_id:
+                sections[i] = updated
+                break
+        stack[-1] = (deepest_level, updated)
 
     return sections
 

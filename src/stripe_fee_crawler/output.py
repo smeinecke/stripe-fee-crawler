@@ -123,6 +123,8 @@ class OutputPublisher:
         markets: list[Market],
         unsupported: list[UnsupportedMarket],
         transient_failures: list[UnsupportedMarket],
+        aliases: dict[str, str] | None = None,
+        fee_page_urls: dict[str, list[str]] | None = None,
     ) -> tuple[bool, Path]:
         """Write all output files to a staging directory and return (changed, staging_path)."""
         staging = self._make_staging()
@@ -136,7 +138,7 @@ class OutputPublisher:
         self._write_market_files(staging, outputs)
         self._write_core_fees(staging, outputs)
         self._write_payment_methods(staging, outputs)
-        self._write_manifest(staging, markets, unsupported, transient_failures)
+        self._write_manifest(staging, markets, unsupported, transient_failures, aliases, fee_page_urls)
         self._write_schemas(schemas_dir)
 
         return staging != self.output_dir, staging
@@ -251,6 +253,8 @@ class OutputPublisher:
         markets: list[Market],
         unsupported: list[UnsupportedMarket],
         transient_failures: list[UnsupportedMarket],
+        aliases: dict[str, str] | None = None,
+        fee_page_urls: dict[str, list[str]] | None = None,
     ) -> MarketManifest:
         """Publish the market manifest and metadata files."""
         manifest = MarketManifest(
@@ -259,6 +263,8 @@ class OutputPublisher:
             markets=sorted(markets, key=lambda m: m.account_country),
             unsupported=sorted(unsupported, key=lambda u: u.stripe_market_code),
             transient_failures=sorted(transient_failures, key=lambda u: u.stripe_market_code),
+            aliases=aliases or {},
+            fee_page_urls=fee_page_urls or {},
         )
         _write_json(staging / "meta" / "markets.json", manifest.model_dump())
         unsupported_only = [u for u in unsupported if u.status == "unsupported"]

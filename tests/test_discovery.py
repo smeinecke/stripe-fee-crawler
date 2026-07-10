@@ -81,11 +81,28 @@ def test_extract_footer_markets() -> None:
     </footer></body></html>
     """
     tree = html.fromstring(html_text)
-    markets = _extract_footer_markets(tree)
+    markets, aliases = _extract_footer_markets(tree)
     codes = {m.account_country for m in markets}
     assert "DE" in codes
     assert "GB" in codes
     assert "US" in codes
+    assert aliases.get("en-de") == "de"
+    assert aliases.get("en-gb") == "gb"
+
+
+def test_extract_footer_markets_dedup_by_country() -> None:
+    html_text = """
+    <html><body><footer>
+      <a href="/en-de">Germany</a>
+      <a href="/de-de">Germany</a>
+      <a href="/en-gb">United Kingdom</a>
+    </footer></body></html>
+    """
+    tree = html.fromstring(html_text)
+    markets, aliases = _extract_footer_markets(tree)
+    germany = [m for m in markets if m.account_country == "DE"]
+    assert len(germany) == 1
+    assert aliases.get("de-de") == "de"
 
 
 def test_pricing_url_for() -> None:
@@ -98,6 +115,13 @@ def test_payment_methods_url_for() -> None:
     assert _payment_methods_url_for(market) == "https://stripe.com/pricing/local-payment-methods"
     market_de = build_market_from_code("DE")
     assert _payment_methods_url_for(market_de) == "https://stripe.com/en-de/pricing/local-payment-methods"
+
+
+def test_currency_assignments_czechia_hungary() -> None:
+    cz = build_market_from_code("CZ")
+    hu = build_market_from_code("HU")
+    assert cz.default_currency == "CZK"
+    assert hu.default_currency == "HUF"
 
 
 @pytest.mark.asyncio
@@ -127,6 +151,7 @@ async def test_discover_markets_with_fixture() -> None:
         },
     )
     async with HttpClient(config) as client:
-        markets = await discover_markets(client, config)
+        markets, aliases = await discover_markets(client, config)
     codes = {m.account_country for m in markets}
     assert "DE" in codes or "US" in codes
+    assert "en-de" in aliases or "en-gb" in aliases

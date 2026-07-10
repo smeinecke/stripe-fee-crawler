@@ -58,16 +58,21 @@ class StripeCrawler:
         self.config = config or CrawlConfiguration()
         self.http_client = HttpClient(config=self.config)
         self.warnings: list[ParserWarning] = []
+        self.aliases: dict[str, str] = {}
+        self.fee_page_urls: dict[str, list[str]] = {}
 
     async def discover(self) -> list[Market]:
         """Discover Stripe markets dynamically or from the bootstrap list."""
         if self.config.markets:
+            self.aliases = {}
             return [build_market_from_code(code, status="supported") for code in self.config.markets]
         try:
-            markets = await discover_markets(self.http_client, self.config)
+            markets, aliases = await discover_markets(self.http_client, self.config)
+            self.aliases = aliases
         except MarketDiscoveryError as exc:
             logger.warning("Dynamic market discovery failed: %s; using bootstrap list", exc)
             markets = get_bootstrap_markets()
+            self.aliases = {}
         return markets
 
     async def crawl_market(self, market: Market) -> MarketOutput:
@@ -90,6 +95,9 @@ class StripeCrawler:
 
         try:
             pricing_url, payment_methods_url = await discover_fee_pages(self.http_client, market, self.config)
+            self.fee_page_urls[market.stripe_market_code] = [
+                u for u in [pricing_url, payment_methods_url] if u
+            ]
         except UnsupportedMarketError as exc:
             return MarketOutput(
                 market=market,
@@ -256,7 +264,14 @@ class StripeCrawler:
                 if o.transient_failure
             ]
 
-            _, staging = publisher.publish(outputs, markets, unsupported, transient_failures)
+            _, staging = publisher.publish(
+                outputs,
+                markets,
+                unsupported,
+                transient_failures,
+                aliases=self.aliases,
+                fee_page_urls=self.fee_page_urls,
+            )
 
             # Regression check against previous published data if it exists.
             old_dir = Path(output_dir)

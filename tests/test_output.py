@@ -187,3 +187,16 @@ def test_commit_rolls_back_live_on_validation_failure(tmp_path: Path) -> None:
     assert (tmp_path / "json" / "DE.json").read_text() == original_de
     assert not (tmp_path / "json" / "US.json").exists()
     assert not staging2.exists()
+
+
+def test_publish_writes_manifest_metadata(tmp_path: Path) -> None:
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    output = _minimal_output("DE")
+    aliases = {"en-de": "de", "de-de": "de"}
+    fee_page_urls = {"de": ["https://stripe.com/en-de/pricing"]}
+    _, staging = publisher.publish([output], [output.market], [], [], aliases=aliases, fee_page_urls=fee_page_urls)
+    manifest_path = staging / "meta" / "markets.json"
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["aliases"] == aliases
+    assert manifest["fee_page_urls"] == fee_page_urls

@@ -180,6 +180,7 @@ def _infer_payment_method(section: Section, phrase: str) -> str | None:
             "wechat pay",
             "amazon pay",
             "satispay",
+            "konbini",
             "link",
             "card",
             "terminal",
