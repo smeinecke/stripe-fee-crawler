@@ -89,11 +89,8 @@ async def test_publish_with_regression(tmp_path: Path) -> None:
         derivation_status="complete",
     )
     publisher = OutputPublisher(tmp_path, timestamp=None)
-    publisher.publish_markets([output])
-    publisher.publish_core_fees([output])
-    publisher.publish_payment_methods([output])
-    publisher.publish_manifest([market], [], {}, [])
-    publisher.commit(validate=False)
+    _, staging = publisher.publish([output], [market], [], [])
+    publisher.commit(staging, validate=False)
 
     # Second publish with a large percentage change.
     output2 = output.model_copy(
@@ -115,11 +112,8 @@ async def test_publish_with_regression(tmp_path: Path) -> None:
         },
     )
     publisher2 = OutputPublisher(tmp_path / "new", timestamp=None)
-    publisher2.publish_markets([output2])
-    publisher2.publish_core_fees([output2])
-    publisher2.publish_payment_methods([output2])
-    publisher2.publish_manifest([market], [], {}, [])
-    publisher2.commit(validate=False)
+    _, staging2 = publisher2.publish([output2], [market], [], [])
+    publisher2.commit(staging2, validate=False)
 
     from stripe_fee_crawler.regression import check_regression
 

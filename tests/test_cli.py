@@ -51,8 +51,8 @@ def test_cli_validate(tmp_path: Path) -> None:
         derivation_status="partial",
     )
     publisher = OutputPublisher(tmp_path, timestamp=None)
-    publisher.publish_markets([output])
-    publisher.commit(validate=False)
+    _, staging = publisher.publish([output], [market], [], [])
+    publisher.commit(staging, validate=False)
 
     runner = CliRunner()
     result = runner.invoke(main, ["validate", str(tmp_path)])
@@ -99,11 +99,11 @@ def test_cli_diff(tmp_path: Path) -> None:
     old = tmp_path / "old"
     new = tmp_path / "new"
     publisher_old = OutputPublisher(old, timestamp=None)
-    publisher_old.publish_markets([output])
-    publisher_old.commit(validate=False)
+    _, staging_old = publisher_old.publish([output], [market], [], [])
+    publisher_old.commit(staging_old, validate=False)
     publisher_new = OutputPublisher(new, timestamp=None)
-    publisher_new.publish_markets([output])
-    publisher_new.commit(validate=False)
+    _, staging_new = publisher_new.publish([output], [market], [], [])
+    publisher_new.commit(staging_new, validate=False)
 
     runner = CliRunner()
     result = runner.invoke(main, ["diff", str(old), str(new)])

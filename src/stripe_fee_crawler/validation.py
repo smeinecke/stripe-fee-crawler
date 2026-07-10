@@ -22,17 +22,6 @@ from .models import (
 logger = logging.getLogger(__name__)
 
 
-def _load_json_schema(schema_path: str) -> dict[str, Any] | None:
-    try:
-        with open(schema_path, encoding="utf-8") as fh:
-            return json.load(fh)
-    except FileNotFoundError:
-        return None
-    except Exception as exc:
-        logger.warning("Could not load schema %s: %s", schema_path, exc)
-        return None
-
-
 def validate_market_output(data: dict[str, Any]) -> MarketOutput:
     """Validate a per-market output dictionary."""
     try:
@@ -71,6 +60,46 @@ def validate_manifest(data: dict[str, Any]) -> MarketManifest:
         return MarketManifest.model_validate(data)
     except ValidationError as exc:
         raise CrawlerValidationError(f"Manifest validation failed: {exc}") from exc
+
+
+def generate_market_output_schema() -> dict[str, Any]:
+    """Generate the JSON schema for per-market output."""
+    schema = MarketOutput.model_json_schema()
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    schema["$id"] = "https://github.com/smeinecke/stripe-fee-data/schemas/stripe-fees-v1.schema.json"
+    return schema
+
+
+def generate_core_fees_schema() -> dict[str, Any]:
+    """Generate the JSON schema for the consolidated core fees file."""
+    schema = CoreFees.model_json_schema()
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    schema["$id"] = "https://github.com/smeinecke/stripe-fee-data/schemas/core-fees-v1.schema.json"
+    return schema
+
+
+def generate_payment_methods_schema() -> dict[str, Any]:
+    """Generate the JSON schema for the payment-methods catalog."""
+    schema = PaymentMethodCatalog.model_json_schema()
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    schema["$id"] = "https://github.com/smeinecke/stripe-fee-data/schemas/payment-methods-v1.schema.json"
+    return schema
+
+
+def generate_index_schema() -> dict[str, Any]:
+    """Generate the JSON schema for the market index file."""
+    schema = MarketIndex.model_json_schema()
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    schema["$id"] = "https://github.com/smeinecke/stripe-fee-data/schemas/index-v1.schema.json"
+    return schema
+
+
+def generate_manifest_schema() -> dict[str, Any]:
+    """Generate the JSON schema for the market manifest file."""
+    schema = MarketManifest.model_json_schema()
+    schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
+    schema["$id"] = "https://github.com/smeinecke/stripe-fee-data/schemas/manifest-v1.schema.json"
+    return schema
 
 
 def validate_all_output(output_dir: str | Path, strict: bool = True) -> dict[str, Any]:

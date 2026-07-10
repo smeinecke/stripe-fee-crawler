@@ -47,11 +47,9 @@ def _build_repo(path: Path, countries: list[str], rules_count: int = 1) -> None:
                 derivation_status="complete" if rules_count else "unclassified",
             )
         )
-    publisher.publish_markets(outputs)
-    publisher.publish_core_fees(outputs)
-    publisher.publish_payment_methods(outputs)
-    publisher.publish_manifest([], [], {}, [])
-    publisher.commit(validate=False)
+    markets = [o.market for o in outputs]
+    _, staging = publisher.publish(outputs, markets, [], [])
+    publisher.commit(staging, validate=False)
 
 
 def test_no_regression_identical(tmp_path: Path) -> None:

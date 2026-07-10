@@ -241,6 +241,7 @@ class StripeCrawler:
     ) -> CrawlReport:
         """Publish outputs to the data repository."""
         publisher = OutputPublisher(output_dir, timestamp=self.config.timestamp)
+        staging: Path | None = None
         try:
             markets = [o.market for o in outputs]
             transient_failures = [
@@ -254,28 +255,28 @@ class StripeCrawler:
                 for o in outputs
                 if o.transient_failure
             ]
-            aliases: dict[str, str] = {}
 
-            publisher.publish_markets(outputs)
-            publisher.publish_core_fees(outputs)
-            publisher.publish_payment_methods(outputs)
-            publisher.publish_manifest(markets, unsupported, aliases, transient_failures)
+            _, staging = publisher.publish(outputs, markets, unsupported, transient_failures)
 
             # Regression check against previous published data if it exists.
             old_dir = Path(output_dir)
-            change_report = None
-            if (old_dir / "json" / "index.json").exists() and atomic:
-                change_report = check_regression(old_dir, publisher.staging_dir or old_dir)
-                publisher.publish_change_report(change_report)
+            if (old_dir / "json" / "index.json").exists():
+                change_report = check_regression(old_dir, staging)
             else:
-                publisher.publish_change_report(ChangeReport())
+                change_report = ChangeReport()
+            publisher.publish_change_report(staging, change_report)
+
+            if fail_on_regression and change_report.has_regression:
+                from .exceptions import RegressionError
+
+                raise RegressionError("Regression detected; publication aborted")
 
             if atomic:
-                publisher.commit(validate=True)
+                changed, _ = publisher.commit(staging, validate=True)
             else:
-                validate_all_output(publisher.staging_dir or old_dir, strict=True)
+                validate_all_output(staging, strict=True)
+                changed = _staging_changed(staging, old_dir)
 
-            changed = bool(publisher.staging_dir and _staging_changed(publisher.staging_dir, old_dir))
             report = CrawlReport(
                 exit_code=0,
                 changed=changed,
@@ -287,13 +288,10 @@ class StripeCrawler:
                 warnings=self.warnings,
                 change_report_path=str(Path(output_dir) / "change-report.json"),
             )
-            if fail_on_regression and change_report and change_report.has_regression:
-                from .exceptions import RegressionError
-
-                raise RegressionError("Regression detected; publication aborted")
             return report
         except Exception:
-            publisher.rollback()
+            if staging is not None:
+                publisher.rollback(staging)
             raise
 
     async def close(self) -> None:

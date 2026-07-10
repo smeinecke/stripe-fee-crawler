@@ -10,6 +10,11 @@ from stripe_fee_crawler.exceptions import ValidationError as CrawlerValidationEr
 from stripe_fee_crawler.models import Market, MarketOutput, Source
 from stripe_fee_crawler.output import OutputPublisher
 from stripe_fee_crawler.validation import (
+    generate_core_fees_schema,
+    generate_index_schema,
+    generate_manifest_schema,
+    generate_market_output_schema,
+    generate_payment_methods_schema,
     validate_all_output,
     validate_core_fees,
     validate_manifest,
@@ -51,8 +56,8 @@ def test_validate_all_output(tmp_path: Path) -> None:
         derivation_status="partial",
     )
     publisher = OutputPublisher(tmp_path, timestamp=None)
-    publisher.publish_markets([output])
-    publisher.commit(validate=False)
+    _, staging = publisher.publish([output], [output.market], [], [])
+    publisher.commit(staging, validate=False)
     result = validate_all_output(tmp_path)
     assert result["success"]
 
@@ -113,3 +118,19 @@ def test_validate_manifest() -> None:
     }
     validated = validate_manifest(data)
     assert validated.markets == []
+
+
+@pytest.mark.parametrize(
+    ("generator", "schema_id"),
+    [
+        (generate_market_output_schema, "stripe-fees-v1.schema.json"),
+        (generate_core_fees_schema, "core-fees-v1.schema.json"),
+        (generate_payment_methods_schema, "payment-methods-v1.schema.json"),
+        (generate_index_schema, "index-v1.schema.json"),
+        (generate_manifest_schema, "manifest-v1.schema.json"),
+    ],
+)
+def test_generated_schemas_have_id(generator, schema_id: str) -> None:
+    schema = generator()
+    assert "$id" in schema
+    assert schema_id in schema["$id"]
