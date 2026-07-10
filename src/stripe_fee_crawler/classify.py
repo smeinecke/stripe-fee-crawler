@@ -262,7 +262,8 @@ def _classify_entry(entry: PricingEntry) -> FeeRule | None:
     )
 
     if calculable:
-        assert unit is not None and behavior is not None
+        if unit is None or behavior is None:
+            raise ValueError(f"calculable rule for {fee_category} missing unit or behavior")
         return FeeRule(
             rule_id=rule_id,
             entry_id=entry.entry_id,
