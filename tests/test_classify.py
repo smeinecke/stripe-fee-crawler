@@ -157,3 +157,87 @@ def test_fixed_amount_minor_uses_iso_exponents() -> None:
     assert _fixed_amount_minor("0.250", "BHD") == "250"
     assert _fixed_amount_minor("0.25", "EUR") == "25"
     assert _fixed_amount_minor("invalid", "USD") is None
+
+
+def test_us_online_domestic_card_rate(us_pricing_html: str) -> None:
+    entries, _ = extract_pricing_entries(us_pricing_html, "https://stripe.com/pricing", page_kind="pricing")
+    rules, _ = classify_entries(entries)
+    domestic = [
+        r
+        for r in rules
+        if r.classification_status == "calculable_rule"
+        and r.product_id == "payments"
+        and r.channel == "online"
+        and r.payment_method == "card"
+        and r.card_origin == "domestic"
+    ]
+    assert domestic, "expected US online domestic card rule"
+    assert domestic[0].percentage == "2.9"
+    assert domestic[0].fixed_amount == "0.30"
+    assert domestic[0].fixed_currency == "USD"
+
+
+def test_us_terminal_domestic_rate(us_pricing_html: str) -> None:
+    entries, _ = extract_pricing_entries(us_pricing_html, "https://stripe.com/pricing", page_kind="pricing")
+    rules, _ = classify_entries(entries)
+    terminal = [
+        r
+        for r in rules
+        if r.classification_status == "calculable_rule"
+        and r.product_id == "terminal"
+        and r.channel == "in_person"
+        and r.payment_method == "card"
+        and r.card_origin == "domestic"
+    ]
+    assert terminal, "expected US terminal domestic card rule"
+    assert terminal[0].percentage == "2.7"
+    assert terminal[0].fixed_amount == "0.05"
+    assert terminal[0].fixed_currency == "USD"
+
+
+def test_us_ach_direct_debit_rate_with_cap() -> None:
+    entry = PricingEntry(
+        entry_id="test",
+        source_text="ACH Direct Debit 0.8% per transaction with a $5 cap",
+        source_url="https://stripe.com/us/pricing",
+        section_path=["Payment methods"],
+        payment_method="ach_direct_debit",
+    )
+    rules, _ = classify_entries([entry], "US")
+    ach = [r for r in rules if r.classification_status == "calculable_rule" and r.product_id == "ach_direct_debit"]
+    assert ach, "expected ACH Direct Debit calculable rule"
+    assert ach[0].percentage == "0.8"
+    assert any(c.type == "maximum_fee" and c.amount == "5" and c.currency == "USD" for c in ach[0].fee_components)
+
+
+def test_de_standard_eea_card_rate(de_pricing_html: str) -> None:
+    entries, _ = extract_pricing_entries(de_pricing_html, "https://stripe.com/en-de/pricing", page_kind="pricing")
+    rules, _ = classify_entries(entries)
+    standard_eea = [
+        r
+        for r in rules
+        if r.classification_status == "calculable_rule"
+        and r.product_id == "payments"
+        and r.card_region == "eea"
+        and r.card_tier == "standard"
+    ]
+    assert standard_eea, "expected DE standard EEA card rule"
+    assert standard_eea[0].percentage == "1.5"
+    assert standard_eea[0].fixed_amount == "0.25"
+    assert standard_eea[0].fixed_currency == "EUR"
+
+
+def test_de_international_card_rate(de_pricing_html: str) -> None:
+    entries, _ = extract_pricing_entries(de_pricing_html, "https://stripe.com/en-de/pricing", page_kind="pricing")
+    rules, _ = classify_entries(entries)
+    international = [
+        r
+        for r in rules
+        if r.classification_status == "calculable_rule"
+        and r.product_id == "payments"
+        and r.card_region == "international"
+    ]
+    assert international, "expected DE international card rule"
+    assert international[0].percentage == "3.25"
+    assert international[0].fixed_amount == "0.25"
+    assert international[0].fixed_currency == "EUR"

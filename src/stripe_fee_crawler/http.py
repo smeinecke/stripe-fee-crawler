@@ -23,15 +23,7 @@ from .exceptions import (
     RateLimitError,
     TransientNetworkError,
 )
-from .http_cache import (
-    cache_key,
-    is_fresh,
-    read_cache_entry,
-    remove_cache_entry,
-    requires_revalidation,
-    should_persist_to_cache,
-    write_cache_entry,
-)
+from .http_cache import HttpCache
 from .models import CacheStats, CrawlConfiguration
 
 logger = logging.getLogger(__name__)
@@ -92,7 +84,7 @@ class HttpResponse:
 
 @dataclass
 class CachedSource:
-    """Previously published source data for conditional requests."""
+    """Previously published source data for conditional requests (kept for compat)."""
 
     etag: str | None = None
     last_modified: str | None = None
@@ -100,7 +92,7 @@ class CachedSource:
 
 
 class HttpClient:
-    """HTTP client with retries, allowlist, conditional request, and cache support."""
+    """HTTP client with retries, allowlist, conditional requests, and response caching."""
 
     def __init__(
         self,
@@ -111,7 +103,11 @@ class HttpClient:
         self.config = config or CrawlConfiguration()
         self._semaphore = asyncio.Semaphore(self.config.max_workers)
         self._transport = transport
-        self.cache_stats = cache_stats or CacheStats()
+        self._cache = HttpCache(self.config)
+
+    @property
+    def cache_stats(self) -> CacheStats:
+        return self._cache.stats
 
     async def close(self) -> None:
         """No-op; each request owns its own client."""
@@ -305,17 +301,13 @@ class HttpClient:
             client_kwargs["transport"] = self._transport
         return httpx.AsyncClient(**client_kwargs)
 
-    def _cache_key(self, url: str, method: str) -> str:
-        return cache_key(url, method)
-
-    def _update_cache_stats(self, **kwargs: int) -> None:
-        """Increment the mutable cache statistics counters."""
-        self.cache_stats = self.cache_stats.model_copy(update=kwargs)
-
     async def _request(
         self,
         method: str,
         url: str,
+        *,
+        market: str | None = None,
+        locale: str | None = None,
         cached: CachedSource | None = None,
         **kwargs: Any,
     ) -> HttpResponse:
@@ -330,161 +322,94 @@ class HttpClient:
                 text=content.decode("utf-8"),
                 headers={"content-type": "text/html"},
             )
+
         self._validate_url(url)
 
-        # Load a cached response when available. The cache is only used for GET
-        # requests unless --no-cache is set.
-        cache_lookup_key: str | None = None
-        cached_entry: dict[str, Any] | None = None
-        if method == "GET" and not self.config.no_cache:
-            cache_lookup_key = self._cache_key(url, method)
-            cached_entry = read_cache_entry(self.config, cache_lookup_key)
-
-        headers: dict[str, str] = kwargs.pop("headers", {})
-        # Use the most specific validators: the caller-supplied CachedSource,
-        # then the on-disk cache entry, then none.
-        etag = None
-        last_modified = None
-        if cached and cached.etag:
-            etag = cached.etag
-        elif cached_entry and cached_entry.get("etag"):
-            etag = cached_entry["etag"]
-        if cached and cached.last_modified:
-            last_modified = cached.last_modified
-        elif cached_entry and cached_entry.get("last_modified"):
-            last_modified = cached_entry["last_modified"]
-
-        force_revalidate = self.config.refresh_cache
-        if cached_entry:
-            force_revalidate = force_revalidate or requires_revalidation(cached_entry.get("headers", {}))
-            if not is_fresh(self.config, cached_entry):
-                force_revalidate = True
-            elif not force_revalidate:
-                # Fresh cache hit with no revalidation directive: return directly.
-                self._update_cache_stats(
-                    cache_hits=self.cache_stats.cache_hits + 1,
-                    bytes_avoided=self.cache_stats.bytes_avoided + len(cached_entry["content"]),
-                )
-                return HttpResponse(
-                    url=cached_entry["url"],
-                    status_code=cached_entry["status_code"],
-                    content=cached_entry["content"],
-                    text=cached_entry["content"].decode("utf-8", errors="replace"),
-                    headers=cached_entry["headers"],
-                    etag=cached_entry.get("etag"),
-                    last_modified=cached_entry.get("last_modified"),
-                    from_cache=True,
-                )
-
-        if etag:
-            headers["If-None-Match"] = etag
-        if last_modified:
-            headers["If-Modified-Since"] = last_modified
-
-        last_error: Exception | None = None
-        for attempt in range(self.config.max_retries + 1):
-            try:
-                async with self._semaphore:
-                    logger.debug("%s %s (attempt %d)", method, _sanitize_url(url), attempt + 1)
-                    client = self._client_for_request()
-                    async with client:
-                        response = await client.request(
-                            method,
-                            url,
-                            headers=headers,
-                            **kwargs,
-                        )
-                    final_url = str(response.url)
-                    if final_url != url:
-                        self._validate_url(final_url)
-                    if len(response.content) > self.config.max_response_size:
-                        raise ContentSecurityError(
-                            f"Response size {len(response.content)} exceeds limit for {final_url}"
-                        )
-                    if response.status_code == 304:
-                        if cached_entry and cache_lookup_key and not self.config.no_cache:
-                            # Revalidation succeeded: refresh stored timestamp.
-                            write_cache_entry(
-                                self.config,
-                                cache_lookup_key,
-                                cached_entry["url"],
-                                cached_entry["status_code"],
-                                cached_entry["headers"],
-                                cached_entry["content"],
-                                etag=response.headers.get("etag") or cached_entry.get("etag"),
-                                last_modified=response.headers.get("last-modified")
-                                or cached_entry.get("last_modified"),
+        async def _network(req_headers: dict[str, str], reval_headers: dict[str, str]) -> httpx.Response:
+            headers = {**req_headers, **reval_headers}
+            last_error: Exception | None = None
+            for attempt in range(self.config.max_retries + 1):
+                try:
+                    async with self._semaphore:
+                        logger.debug("%s %s (attempt %d)", method, _sanitize_url(url), attempt + 1)
+                        async with self._client_for_request() as client:
+                            response = await client.request(method, url, headers=headers, **kwargs)
+                        final_url = str(response.url)
+                        if final_url != url:
+                            self._validate_url(final_url)
+                        if len(response.content) > self.config.max_response_size:
+                            raise ContentSecurityError(
+                                f"Response size {len(response.content)} exceeds limit for {final_url}"
                             )
-                        avoided = len(cached_entry["content"]) if cached_entry else 0
-                        self._update_cache_stats(
-                            cache_revalidations=self.cache_stats.cache_revalidations + 1,
-                            cache_304_responses=self.cache_stats.cache_304_responses + 1,
-                            bytes_avoided=self.cache_stats.bytes_avoided + avoided,
-                        )
-                        return HttpResponse(
+                        if response.status_code == 304:
+                            return response
+                        http_response = HttpResponse(
                             url=final_url,
-                            status_code=304,
-                            content=b"",
-                            text="",
+                            status_code=response.status_code,
+                            content=response.content,
+                            text=response.text,
                             headers=dict(response.headers),
                             etag=response.headers.get("etag"),
                             last_modified=response.headers.get("last-modified"),
-                            from_cache=True,
                         )
-                    http_response = HttpResponse(
-                        url=final_url,
-                        status_code=response.status_code,
-                        content=response.content,
-                        text=response.text,
-                        headers=dict(response.headers),
-                        etag=response.headers.get("etag"),
-                        last_modified=response.headers.get("last-modified"),
-                    )
-                    self._detect_blocking_page(http_response)
-                    written = False
-                    if not self.config.no_cache and method == "GET" and should_persist_to_cache(http_response.headers):
-                        if cache_lookup_key:
-                            write_cache_entry(
-                                self.config,
-                                cache_lookup_key,
-                                http_response.url,
-                                http_response.status_code,
-                                http_response.headers,
-                                http_response.content,
-                                etag=http_response.etag,
-                                last_modified=http_response.last_modified,
-                            )
-                            written = True
-                    elif cache_lookup_key:
-                        remove_cache_entry(self.config, cache_lookup_key)
-                    self._update_cache_stats(
-                        cache_misses=self.cache_stats.cache_misses + 1,
-                        cache_writes=self.cache_stats.cache_writes + (1 if written else 0),
-                    )
-                    if self.config.request_delay > 0:
-                        await asyncio.sleep(self.config.request_delay)
-                    return http_response
-            except (TransientNetworkError, httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as exc:
-                last_error = exc
-                if attempt >= self.config.max_retries:
-                    raise NetworkError(f"Failed after {attempt + 1} attempts: {url}") from exc
-                retry_after = 0.0
-                if isinstance(exc, TransientNetworkError) and exc.retry_after is not None:
-                    try:
-                        retry_after = float(exc.retry_after)
-                    except ValueError:
-                        retry_after = 0.0
-                delay = max(retry_after, self._calculate_backoff(attempt))
-                logger.warning("Transient error for %s, retrying in %.2fs: %s", _sanitize_url(url), delay, exc)
-                await asyncio.sleep(delay)
-            except (ContentSecurityError, PermanentNetworkError):
-                raise
-        if last_error:
-            raise NetworkError(f"Failed to request {url}") from last_error
-        raise NetworkError(f"Unexpected end of retries for {url}")
+                        self._detect_blocking_page(http_response)
+                        if self.config.request_delay > 0:
+                            await asyncio.sleep(self.config.request_delay)
+                        return response
+                except (TransientNetworkError, httpx.TimeoutException, httpx.ConnectError, httpx.NetworkError) as exc:
+                    last_error = exc
+                    if attempt >= self.config.max_retries:
+                        raise NetworkError(f"Failed after {attempt + 1} attempts: {url}") from exc
+                    retry_after = 0.0
+                    if isinstance(exc, TransientNetworkError) and exc.retry_after is not None:
+                        try:
+                            retry_after = float(exc.retry_after)
+                        except ValueError:
+                            retry_after = 0.0
+                    delay = max(retry_after, self._calculate_backoff(attempt))
+                    logger.warning("Transient error for %s, retrying in %.2fs: %s", _sanitize_url(url), delay, exc)
+                    await asyncio.sleep(delay)
+                except (ContentSecurityError, PermanentNetworkError):
+                    raise
+            if last_error:
+                raise NetworkError(f"Failed to request {url}") from last_error
+            raise NetworkError(f"Unexpected end of retries for {url}")
 
-    async def get(self, url: str, cached: CachedSource | None = None) -> HttpResponse:
-        return await self._request("GET", url, cached=cached)
+        response, from_cache = await self._cache.fetch(
+            method,
+            url,
+            self._default_headers(),
+            _network,
+            market=market,
+            locale=locale,
+        )
 
-    async def head(self, url: str) -> HttpResponse:
-        return await self._request("HEAD", url)
+        return HttpResponse(
+            url=str(response.url),
+            status_code=response.status_code,
+            content=response.content,
+            text=response.text,
+            headers=dict(response.headers),
+            etag=response.headers.get("etag"),
+            last_modified=response.headers.get("last-modified"),
+            from_cache=from_cache or response.status_code == 304,
+        )
+
+    async def get(
+        self,
+        url: str,
+        *,
+        market: str | None = None,
+        locale: str | None = None,
+        cached: CachedSource | None = None,
+    ) -> HttpResponse:
+        return await self._request("GET", url, market=market, locale=locale, cached=cached)
+
+    async def head(
+        self,
+        url: str,
+        *,
+        market: str | None = None,
+        locale: str | None = None,
+    ) -> HttpResponse:
+        return await self._request("HEAD", url, market=market, locale=locale)

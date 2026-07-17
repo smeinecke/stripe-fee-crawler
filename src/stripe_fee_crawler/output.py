@@ -128,6 +128,7 @@ class OutputPublisher:
         transient_failures: list[UnsupportedMarket],
         aliases: dict[str, str] | None = None,
         fee_page_urls: dict[str, list[str]] | None = None,
+        crawler_revision: str | None = None,
     ) -> tuple[bool, Path]:
         """Write all output files to a staging directory and return (changed, staging_path)."""
         staging = self._make_staging()
@@ -142,6 +143,7 @@ class OutputPublisher:
         self._write_core_fees(staging, outputs)
         self._write_payment_methods(staging, outputs)
         self._write_manifest(staging, markets, unsupported, transient_failures, aliases, fee_page_urls)
+        self._write_crawler_revision(staging, crawler_revision)
         self._write_schemas(schemas_dir)
 
         return staging != self.output_dir, staging
@@ -285,6 +287,14 @@ class OutputPublisher:
         )
         return manifest
 
+    def _write_crawler_revision(self, staging: Path, crawler_revision: str | None) -> None:
+        """Write the crawler Git revision used to generate this data."""
+        if crawler_revision:
+            _write_json(
+                staging / "meta" / "crawler-revision.json",
+                {"crawler_revision": crawler_revision, "generated_at": self.timestamp},
+            )
+
     def _write_schemas(self, schemas_dir: Path) -> None:
         """Generate JSON schemas from Pydantic models and write them to staging."""
         _write_json(schemas_dir / "stripe-fees-v1.schema.json", generate_market_output_schema())
@@ -298,12 +308,10 @@ class OutputPublisher:
         staging: Path,
         change_report: ChangeReport | None,
     ) -> None:
-        """Publish the change report, carrying forward an unchanged previous report."""
-        if change_report is not None:
-            if change_report.changes:
-                _write_json(staging / "change-report.json", change_report.model_dump())
-            elif (self.output_dir / "change-report.json").exists():
-                shutil.copy2(self.output_dir / "change-report.json", staging / "change-report.json")
+        """Publish the computed change report, overwriting any stale previous report."""
+        if change_report is None:
+            change_report = ChangeReport()
+        _write_json(staging / "change-report.json", change_report.model_dump())
 
     def commit(self, staging: Path, validate: bool = True) -> tuple[bool, list[str]]:
         """Atomically replace only managed paths with the staged tree.

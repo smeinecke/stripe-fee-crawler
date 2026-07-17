@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess  # nosec B404
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -107,6 +108,94 @@ def generate_manifest_schema() -> dict[str, Any]:
     return schema
 
 
+def _crawler_submodule_revision(data_dir: Path) -> str | None:
+    """Return the HEAD revision of the ``crawler`` submodule, if present."""
+    crawler_dir = data_dir / "crawler"
+    if not crawler_dir.exists():
+        return None
+    try:
+        result = subprocess.run(  # nosec
+            ["git", "rev-parse", "HEAD"],
+            cwd=crawler_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout.strip() or None
+    except Exception:
+        return None
+
+
+def _validate_publication(output_dir: Path) -> list[str]:
+    """Strict publication checks for the generated data repository."""
+    errors: list[str] = []
+    json_dir = output_dir / "json"
+    core_fees_path = json_dir / "core-fees.json"
+
+    market_has_derived_rules = False
+    market_all_non_calculable: list[str] = []
+    for path in sorted(json_dir.glob("*.json")):
+        if path.name in {"index.json", "core-fees.json", "payment-methods.json"}:
+            continue
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:
+            errors.append(f"{path.name}: cannot read market output: {exc}")
+            continue
+        rules = data.get("derived_rules", [])
+        if not rules:
+            continue
+        market_has_derived_rules = True
+        if not any(_is_calculable_status(r.get("classification_status", "")) for r in rules):
+            market_all_non_calculable.append(path.stem)
+
+    if market_all_non_calculable:
+        errors.append(f"All derived rules are non-calculable for markets: {', '.join(market_all_non_calculable)}")
+
+    core_rule_count = 0
+    if core_fees_path.exists():
+        try:
+            with open(core_fees_path, encoding="utf-8") as fh:
+                core_fees = json.load(fh)
+            core_rule_count = sum(len(m.get("rules", [])) for m in core_fees.get("markets", []))
+        except Exception as exc:
+            errors.append(f"core-fees.json: cannot read: {exc}")
+
+    if market_has_derived_rules and core_rule_count == 0:
+        errors.append("derived rules exist but core-fees.json contains no calculable rules")
+
+    change_report_path = output_dir / "change-report.json"
+    if change_report_path.exists():
+        try:
+            with open(change_report_path, encoding="utf-8") as fh:
+                change_report = json.load(fh)
+            if change_report.get("has_regression"):
+                errors.append("change-report.json has_regression is true")
+        except Exception as exc:
+            errors.append(f"change-report.json: cannot read: {exc}")
+
+    crawler_revision_path = output_dir / "meta" / "crawler-revision.json"
+    if crawler_revision_path.exists():
+        try:
+            with open(crawler_revision_path, encoding="utf-8") as fh:
+                crawler_revision = json.load(fh).get("crawler_revision")
+        except Exception as exc:
+            errors.append(f"meta/crawler-revision.json: cannot read: {exc}")
+            crawler_revision = None
+    else:
+        crawler_revision = None
+
+    submodule_revision = _crawler_submodule_revision(output_dir)
+    if crawler_revision and submodule_revision and crawler_revision != submodule_revision:
+        errors.append(
+            f"crawler submodule revision {submodule_revision[:12]} does not match "
+            f"generated revision {crawler_revision[:12]}"
+        )
+
+    return errors
+
+
 def validate_all_output(output_dir: str | Path, strict: bool = True, semantic: bool = True) -> dict[str, Any]:
     """Validate all generated JSON files in an output directory.
 
@@ -179,6 +268,9 @@ def validate_all_output(output_dir: str | Path, strict: bool = True, semantic: b
         except CrawlerValidationError as exc:
             errors.append(str(exc))
 
+    if strict:
+        errors.extend(_validate_publication(output_dir))
+
     if strict and errors:
         raise CrawlerValidationError("Output validation failed:\n" + "\n".join(errors))
 
@@ -231,16 +323,21 @@ def _validate_rule_calculator_ready(rule: CoreFeeRule, market_code: str, errors:
     if not rule.fee_components:
         errors.append(f"{market_code}/{rule.rule_id}: classified rule has no fee components")
         return
-    calculable_types = {
-        "percentage",
-        "fixed_amount",
-        "percentage_surcharge",
-        "fixed_surcharge",
-        "maximum_fee",
-        "minimum_fee",
-    }
+    base_types = {"percentage", "fixed_amount"}
+    modifier_types = {"percentage_surcharge", "fixed_surcharge"}
+    calculable_types = base_types | modifier_types | {"maximum_fee", "minimum_fee"}
     if not any(comp.type in calculable_types for comp in rule.fee_components):
         errors.append(f"{market_code}/{rule.rule_id}: classified rule has no calculable fee component")
+        return
+    has_base = any(comp.type in base_types for comp in rule.fee_components)
+    has_modifier = any(comp.type in modifier_types for comp in rule.fee_components)
+    if has_modifier and not has_base:
+        # A surcharge-only rule is only valid when it applies a modifier condition.
+        modifier_dimensions = {"currency_conversion_required", "card_origin", "dispute_state", "transaction_type"}
+        if not any(c.dimension in modifier_dimensions for c in rule.conditions):
+            errors.append(
+                f"{market_code}/{rule.rule_id}: base fee appears to be classified only as a surcharge/modifier"
+            )
 
 
 def _validate_rule_percentage_consistency(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:

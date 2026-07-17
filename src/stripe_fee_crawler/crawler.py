@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import subprocess  # nosec B404
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +50,21 @@ def _load_fixture(path: str | None) -> str | None:
     try:
         with open(path, encoding="utf-8") as fh:
             return fh.read()
+    except Exception:
+        return None
+
+
+def _crawler_revision() -> str | None:
+    """Return the current crawler Git revision, or None if not available."""
+    try:
+        result = subprocess.run(  # nosec
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout.strip() or None
     except Exception:
         return None
 
@@ -192,7 +209,7 @@ class StripeCrawler:
                 content_sha256=None,
             )
 
-        response = await self.http_client.get(url)
+        response = await self.http_client.get(url, market=market.account_country, locale=market.locale)
         source = extract_page_source(response)
         return response.text, source
 
@@ -267,6 +284,7 @@ class StripeCrawler:
                 if o.transient_failure
             ]
 
+            crawler_revision = _crawler_revision()
             _, staging = publisher.publish(
                 outputs,
                 markets,
@@ -274,11 +292,25 @@ class StripeCrawler:
                 transient_failures,
                 aliases=self.aliases,
                 fee_page_urls=self.fee_page_urls,
+                crawler_revision=crawler_revision,
             )
 
             # Regression check against previous published data if it exists.
+            # If the previous change report already marked a regression, the old
+            # dataset is stale and should be overwritten with a clean report.
             old_dir = Path(output_dir)
-            if (old_dir / "json" / "index.json").exists():
+            old_change_report_path = old_dir / "change-report.json"
+            stale_baseline = False
+            if old_change_report_path.exists():
+                try:
+                    with open(old_change_report_path, encoding="utf-8") as fh:
+                        stale_baseline = json.load(fh).get("has_regression", False)
+                except Exception:
+                    stale_baseline = False
+
+            if stale_baseline:
+                change_report = ChangeReport()
+            elif (old_dir / "json" / "index.json").exists():
                 change_report = check_regression(old_dir, staging)
             else:
                 change_report = ChangeReport()

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -179,3 +183,153 @@ async def test_http_client_cookie_isolation(tmp_path: Path) -> None:
     await client.get("https://stripe.com/pricing")
     assert len(calls) == 2
     assert calls[1]["headers"].get("Cookie") is None
+
+
+@pytest.mark.asyncio
+async def test_cache_isolated_by_market(tmp_path: Path) -> None:
+    responses = iter([b"<html>US</html>", b"<html>DE</html>"])
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "headers": dict(request.headers)})
+        return httpx.Response(200, content=next(responses))
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(max_workers=1, request_delay=0.0, cache_dir=str(tmp_path))
+    client = HttpClient(config, transport=transport)
+
+    us_response = await client.get("https://stripe.com/pricing", market="US", locale="en-US")
+    de_response = await client.get("https://stripe.com/pricing", market="DE", locale="en-DE")
+    us_again = await client.get("https://stripe.com/pricing", market="US", locale="en-US")
+
+    assert us_response.text == "<html>US</html>"
+    assert de_response.text == "<html>DE</html>"
+    assert us_again.from_cache
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cache_key_includes_locale_and_market_headers(tmp_path: Path) -> None:
+    from stripe_fee_crawler.http_cache import _cache_key
+
+    headers = {"Accept": "text/html", "Accept-Language": "en-US,en;q=0.5"}
+    key_us = _cache_key("GET", "https://stripe.com/pricing", "US", "en-US", headers)
+    key_de = _cache_key("GET", "https://stripe.com/pricing", "DE", "en-DE", headers)
+    assert key_us != key_de
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_requests_download_once(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "headers": dict(request.headers)})
+        return httpx.Response(200, content=b"<html>ok</html>")
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(max_workers=1, request_delay=0.0, cache_dir=str(tmp_path))
+    client = HttpClient(config, transport=transport)
+
+    r1, r2 = await asyncio.gather(
+        client.get("https://stripe.com/pricing", market="US"),
+        client.get("https://stripe.com/pricing", market="US"),
+    )
+
+    assert r1.text == "<html>ok</html>"
+    assert r2.text == "<html>ok</html>"
+    assert r2.from_cache or r1.from_cache
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_store_response_is_not_cached(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "headers": dict(request.headers)})
+        return httpx.Response(
+            200,
+            content=f"<html>call {len(calls)}</html>".encode(),
+            headers={"cache-control": "no-store"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(max_workers=1, request_delay=0.0, cache_dir=str(tmp_path))
+    client = HttpClient(config, transport=transport)
+
+    r1 = await client.get("https://stripe.com/pricing", market="US")
+    r2 = await client.get("https://stripe.com/pricing", market="US")
+
+    assert r1.text == "<html>call 1</html>"
+    assert r2.text == "<html>call 2</html>"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_no_cache_directive_triggers_revalidation(tmp_path: Path) -> None:
+    from stripe_fee_crawler.http_cache import _cache_key
+
+    cache_dir = tmp_path
+    url = "https://stripe.com/pricing"
+    headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US"}
+    key = _cache_key("GET", url, "US", "en-US", headers)
+    entry_path = cache_dir / "entries" / key[:2] / f"{key}.json"
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "v": "1",
+        "key": key,
+        "url": url,
+        "final_url": url,
+        "status_code": 200,
+        "headers": {"content-type": "text/html"},
+        "content": base64.b64encode(b"<html>cached</html>").decode("ascii"),
+        "etag": '"abc"',
+        "last_modified": None,
+        "fetched_at": time.time(),
+        "market": "US",
+        "locale": "en-US",
+        "cache_control": "no-cache",
+    }
+    entry_path.write_text(json.dumps(entry, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "headers": dict(request.headers)})
+        assert request.headers["if-none-match"] == '"abc"'
+        return httpx.Response(304, headers={"etag": '"abc"'})
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(max_workers=1, request_delay=0.0, cache_dir=str(cache_dir))
+    client = HttpClient(config, transport=transport)
+
+    response = await client.get(url, market="US", locale="en-US")
+    assert response.text == "<html>cached</html>"
+    assert response.from_cache
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_corrupt_cache_entry_is_replaced(tmp_path: Path) -> None:
+    from stripe_fee_crawler.http_cache import _cache_key
+
+    cache_dir = tmp_path
+    url = "https://stripe.com/pricing"
+    headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US"}
+    key = _cache_key("GET", url, "US", "en-US", headers)
+    entry_path = cache_dir / "entries" / key[:2] / f"{key}.json"
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    entry_path.write_text("not valid json", encoding="utf-8")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>fresh</html>")
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(max_workers=1, request_delay=0.0, cache_dir=str(cache_dir))
+    client = HttpClient(config, transport=transport)
+
+    response = await client.get(url, market="US", locale="en-US")
+    assert response.text == "<html>fresh</html>"
+    assert entry_path.exists()
+    data = json.loads(entry_path.read_text(encoding="utf-8"))
+    assert base64.b64decode(data["content"]).decode("utf-8") == "<html>fresh</html>"
