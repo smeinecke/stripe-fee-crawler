@@ -34,7 +34,9 @@ def _strip_safe_query_params(url: str) -> str:
     parsed = urlparse(url)
     if not parsed.query:
         return url
-    pairs = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k.lower() not in _CACHE_SAFE_QUERY_PARAMS]
+    pairs = [
+        (k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k.lower() not in _CACHE_SAFE_QUERY_PARAMS
+    ]
     query = urlencode(pairs)
     return urlunparse(parsed._replace(query=query))
 

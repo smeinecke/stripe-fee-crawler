@@ -203,9 +203,7 @@ def _validate_component_currency_exponents(
     try:
         expected_minor = int(Decimal(comp.amount) * (10**expected_exponent))
     except Exception:
-        errors.append(
-            f"{market_code}/{rule.rule_id}: cannot compute minor units for {comp.amount} {comp.currency}"
-        )
+        errors.append(f"{market_code}/{rule.rule_id}: cannot compute minor units for {comp.amount} {comp.currency}")
         return
     if comp.minor_amount is None or int(comp.minor_amount) != expected_minor:
         errors.append(
@@ -292,9 +290,7 @@ def _validate_core_fees_semantic(
             seen_identities.setdefault(identity, []).append(rule.rule_id)
         for identity, rule_ids in seen_identities.items():
             if len(rule_ids) > 1:
-                errors.append(
-                    f"{entry.stripe_market_code}: semantic identity conflict for {identity}: {rule_ids}"
-                )
+                errors.append(f"{entry.stripe_market_code}: semantic identity conflict for {identity}: {rule_ids}")
     return errors
 
 

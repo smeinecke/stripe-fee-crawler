@@ -212,13 +212,19 @@ def _extract_currency_and_amount(text: str) -> list[dict[str, Any]]:
             is_minor = False
             if group == "symbol" and symbol_or_code in MINOR_CURRENCY_SYMBOLS:
                 amount, is_minor = _normalize_minor_amount(amount, amount_text, symbol_or_code)
-            results.append((span[0], span[1], {
-                "symbol": symbol_or_code,
-                "currency": currency,
-                "amount_text": amount_text,
-                "amount": str(amount),
-                "is_minor": is_minor,
-            }))
+            results.append(
+                (
+                    span[0],
+                    span[1],
+                    {
+                        "symbol": symbol_or_code,
+                        "currency": currency,
+                        "amount_text": amount_text,
+                        "amount": str(amount),
+                        "is_minor": is_minor,
+                    },
+                )
+            )
             seen_spans.append(span)
 
     results.sort(key=lambda r: (r[0], r[1] - r[0]), reverse=True)
@@ -243,11 +249,13 @@ def _extract_percentage(text: str) -> list[dict[str, Any]]:
         value = _parse_decimal(value_text)
         if value is None:
             continue
-        results.append({
-            "percentage_text": value_text,
-            "percentage": str(value),
-            "basis_points": _to_basis_points(value),
-        })
+        results.append(
+            {
+                "percentage_text": value_text,
+                "percentage": str(value),
+                "basis_points": _to_basis_points(value),
+            }
+        )
     return results
 
 

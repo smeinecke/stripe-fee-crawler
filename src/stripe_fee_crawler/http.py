@@ -412,7 +412,8 @@ class HttpClient:
                                 cached_entry["headers"],
                                 cached_entry["content"],
                                 etag=response.headers.get("etag") or cached_entry.get("etag"),
-                                last_modified=response.headers.get("last-modified") or cached_entry.get("last_modified"),
+                                last_modified=response.headers.get("last-modified")
+                                or cached_entry.get("last_modified"),
                             )
                         avoided = len(cached_entry["content"]) if cached_entry else 0
                         self._update_cache_stats(

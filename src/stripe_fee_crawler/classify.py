@@ -507,17 +507,24 @@ def _amount_component_type(hint: str, text: str) -> str:
 def _build_components_for_entry(entry: PricingEntry, hint: str) -> list[FeeComponent]:
     """Convert an entry's tokens into typed fee components."""
     from .pricing_tokens import tokenize_fee_text
+
     components: list[FeeComponent] = []
     tokens = entry.tokens or tokenize_fee_text(entry.source_text)
     if not tokens:
         if hint == "included":
-            components.append(FeeComponent(type="included", source_entry_id=entry.entry_id, source_text=entry.source_text))
+            components.append(
+                FeeComponent(type="included", source_entry_id=entry.entry_id, source_text=entry.source_text)
+            )
         elif hint == "free":
             components.append(FeeComponent(type="free", source_entry_id=entry.entry_id, source_text=entry.source_text))
         elif hint == "custom":
-            components.append(FeeComponent(type="custom_pricing", source_entry_id=entry.entry_id, source_text=entry.source_text))
+            components.append(
+                FeeComponent(type="custom_pricing", source_entry_id=entry.entry_id, source_text=entry.source_text)
+            )
         else:
-            components.append(FeeComponent(type="non_calculable", source_entry_id=entry.entry_id, source_text=entry.source_text))
+            components.append(
+                FeeComponent(type="non_calculable", source_entry_id=entry.entry_id, source_text=entry.source_text)
+            )
         return components
 
     for token in tokens:
@@ -550,7 +557,9 @@ def _build_components_for_entry(entry: PricingEntry, hint: str) -> list[FeeCompo
     return components
 
 
-def _empty_group_rule(group: list[dict[str, Any]], account_country: str | None) -> tuple[FeeRule | None, PricingEntry | None]:
+def _empty_group_rule(
+    group: list[dict[str, Any]], account_country: str | None
+) -> tuple[FeeRule | None, PricingEntry | None]:
     """Attempt to derive a rule even from non-fee or informational entries."""
     base = group[0]["entry"]
     parsed = parse_fee_value(base.source_text)
@@ -611,7 +620,9 @@ def _base_conditions(item: dict[str, Any], account_country: str | None) -> list[
     return conditions
 
 
-def _classify_group(group: list[dict[str, Any]], account_country: str | None) -> tuple[FeeRule | None, PricingEntry | None]:
+def _classify_group(
+    group: list[dict[str, Any]], account_country: str | None
+) -> tuple[FeeRule | None, PricingEntry | None]:
     """Classify a group of related entries into one FeeRule."""
     base_item = group[0]
     base_entry = base_item["entry"]
@@ -668,9 +679,17 @@ def _classify_group(group: list[dict[str, Any]], account_country: str | None) ->
 
     # Default missing channel/unit for well-understood products.
     if not channel:
-        if product_id == "terminal" or payment_method == "tap_to_pay" or _text_has(base_entry.source_text.lower(), "in-person", "in person", "tap to pay"):
+        if (
+            product_id == "terminal"
+            or payment_method == "tap_to_pay"
+            or _text_has(base_entry.source_text.lower(), "in-person", "in person", "tap to pay")
+        ):
             channel = "in_person"
-        elif payment_method or product_id in {"disputes", "instant_payouts", "three_d_secure"} or _text_has(base_entry.source_text.lower(), "card", "payment"):
+        elif (
+            payment_method
+            or product_id in {"disputes", "instant_payouts", "three_d_secure"}
+            or _text_has(base_entry.source_text.lower(), "card", "payment")
+        ):
             channel = "online"
     if not unit:
         if product_id == "disputes":
@@ -710,9 +729,7 @@ def _classify_group(group: list[dict[str, Any]], account_country: str | None) ->
     )
 
     # Build legacy flat fields from components for consumers that still read them.
-    percentage_component = next(
-        (c for c in fee_components if c.type in {"percentage", "percentage_surcharge"}), None
-    )
+    percentage_component = next((c for c in fee_components if c.type in {"percentage", "percentage_surcharge"}), None)
     percentage = percentage_component.value if percentage_component else None
     basis_points = percentage_component.basis_points if percentage_component else None
     fixed = next((c for c in fee_components if c.type == "fixed_amount"), None)
@@ -738,9 +755,8 @@ def _classify_group(group: list[dict[str, Any]], account_country: str | None) ->
         card_origin=card_origin,
         card_region=card_region,
         card_tier=card_tier,
-        currency_conversion_required=any(
-            c.dimension == "currency_conversion_required" and c.value for c in conditions
-        ) or None,
+        currency_conversion_required=any(c.dimension == "currency_conversion_required" and c.value for c in conditions)
+        or None,
         percentage=percentage,
         basis_points=basis_points,
         fixed_amount=fixed.amount if fixed else None,
@@ -760,7 +776,8 @@ def _classify_group(group: list[dict[str, Any]], account_country: str | None) ->
         source_fragments=[{"entry_id": e.entry_id, "text": e.source_text} for e in [i["entry"] for i in group]],
         classification_status=classification_status,
         confidence=confidence,
-        classification_evidence=[f"product={product_id}", f"variant={variant_id}"] + [f"{c.dimension}={c.value}" for c in conditions],
+        classification_evidence=[f"product={product_id}", f"variant={variant_id}"]
+        + [f"{c.dimension}={c.value}" for c in conditions],
     )
 
     # Add reference notes for external fee components such as PayPal fees.
@@ -807,18 +824,20 @@ def _enrich_entries(entries: list[PricingEntry], account_country: str | None) ->
         card_origin = _card_origin_for_region(card_region, account_country)
         variant_id = _variant_id_for(product_id, payment_method, channel, card_region, card_tier, card_origin)
 
-        enriched.append({
-            "entry": entry,
-            "product_id": product_id,
-            "payment_method": payment_method,
-            "channel": channel,
-            "card_region": card_region,
-            "card_tier": card_tier,
-            "card_origin": card_origin,
-            "variant_id": variant_id,
-            "is_modifier": is_modifier,
-            "section_key": tuple(entry.section_path),
-        })
+        enriched.append(
+            {
+                "entry": entry,
+                "product_id": product_id,
+                "payment_method": payment_method,
+                "channel": channel,
+                "card_region": card_region,
+                "card_tier": card_tier,
+                "card_origin": card_origin,
+                "variant_id": variant_id,
+                "is_modifier": is_modifier,
+                "section_key": tuple(entry.section_path),
+            }
+        )
         previous = enriched[-1]
     return enriched
 
@@ -901,7 +920,9 @@ def _coverage_summary(
     for entry in unclassified:
         status = entry.classification_status
         if status == UNCLASSIFIED_CANDIDATE:
-            summary = summary.model_copy(update={"unclassified_fee_candidates": summary.unclassified_fee_candidates + 1})
+            summary = summary.model_copy(
+                update={"unclassified_fee_candidates": summary.unclassified_fee_candidates + 1}
+            )
         if status == AMBIGUOUS:
             summary = summary.model_copy(update={"ambiguous_entries": summary.ambiguous_entries + 1})
         if status == UNSUPPORTED_SHAPE:
@@ -939,6 +960,7 @@ def _calculator_coverage_status(
 def _account_country_from_url(url: str) -> str | None:
     """Infer the account country from a Stripe pricing URL path."""
     import re as _re
+
     match = _re.search(r"/(?:([a-z]{2})-([a-z]{2})|([a-z]{2}))/pricing", url.lower())
     if match:
         return (match.group(2) or match.group(3) or "").upper()
@@ -965,7 +987,15 @@ def classify_entries(
             rules.append(rule)
         if leftover:
             status = leftover.classification_status or UNCLASSIFIED_CANDIDATE
-            if status not in {CUSTOM_PRICING, INCLUDED, FREE, INFORMATIONAL, REFERENCE_ONLY, UNSUPPORTED_SHAPE, AMBIGUOUS}:
+            if status not in {
+                CUSTOM_PRICING,
+                INCLUDED,
+                FREE,
+                INFORMATIONAL,
+                REFERENCE_ONLY,
+                UNSUPPORTED_SHAPE,
+                AMBIGUOUS,
+            }:
                 status = UNCLASSIFIED_CANDIDATE
             leftover = leftover.model_copy(
                 update={

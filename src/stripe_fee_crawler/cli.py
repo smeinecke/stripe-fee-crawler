@@ -69,9 +69,9 @@ def _config_from_options(
         allow_partial=allow_partial,
         source_timestamp_override=source_timestamp,
         cache_dir=cache_dir or _env_default("STRIPE_FEE_CRAWLER_CACHE_DIR"),
-        cache_ttl_hours=cache_ttl_hours if cache_ttl_hours is not None else float(
-            _env_default("STRIPE_FEE_CRAWLER_CACHE_TTL_HOURS") or "24"
-        ),
+        cache_ttl_hours=cache_ttl_hours
+        if cache_ttl_hours is not None
+        else float(_env_default("STRIPE_FEE_CRAWLER_CACHE_TTL_HOURS") or "24"),
         no_cache=no_cache or bool(_env_default("STRIPE_FEE_CRAWLER_NO_CACHE")),
         refresh_cache=refresh_cache or bool(_env_default("STRIPE_FEE_CRAWLER_REFRESH_CACHE")),
     )

@@ -104,12 +104,15 @@ async def test_http_client_detects_login_page() -> None:
 
 def _make_mock_transport(calls: list[dict[str, Any]], cookie_response: bool = False) -> httpx.MockTransport:
     count = 0
+
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal count
-        calls.append({
-            "url": str(request.url),
-            "headers": dict(request.headers),
-        })
+        calls.append(
+            {
+                "url": str(request.url),
+                "headers": dict(request.headers),
+            }
+        )
         count += 1
         if cookie_response and count == 1:
             return httpx.Response(
@@ -118,6 +121,7 @@ def _make_mock_transport(calls: list[dict[str, Any]], cookie_response: bool = Fa
                 headers={"set-cookie": "session=1; Path=/"},
             )
         return httpx.Response(200, text="pricing")
+
     return httpx.MockTransport(handler)
 
 
