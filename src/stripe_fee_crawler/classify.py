@@ -102,6 +102,7 @@ _PAYMENT_METHOD_TOKENS: tuple[str, ...] = (
     "link",
     "card",
     "terminal",
+    "bank_transfer",
 )
 
 
@@ -395,6 +396,10 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
         return "per_charge"
     if "per successful transaction" in text or "per transaction" in text:
         return "per_transaction"
+    if "per successful" in text and "transaction" in text:
+        return "per_transaction"
+    if "per successful" in text and "charge" in text:
+        return "per_charge"
     # Default unit for entries with a recognizable payment method or product.
     method = _infer_payment_method(entry)
     if method:
@@ -794,8 +799,9 @@ def _classify_group(
 def _enrich_entries(entries: list[PricingEntry], account_country: str | None) -> list[dict[str, Any]]:
     """Add derived dimensions to each entry and resolve modifier inheritance."""
     # Use the original list index as a tie-breaker so sections with the same
-    # source_order stay in document order.
-    sorted_entries = sorted(enumerate(entries), key=lambda item: (item[1].source_order, item[0]))
+    # source_order stay in document order.  Keep each crawled page contiguous so
+    # cross-page source_order values do not interleave and break inheritance.
+    sorted_entries = sorted(enumerate(entries), key=lambda item: (item[1].source_url, item[1].source_order, item[0]))
     enriched: list[dict[str, Any]] = []
     previous: dict[str, Any] | None = None
     for _idx, entry in sorted_entries:
@@ -818,7 +824,13 @@ def _enrich_entries(entries: list[PricingEntry], account_country: str | None) ->
                     payment_method = previous["payment_method"]
                 if not card_region and previous["card_region"]:
                     card_region = previous["card_region"]
-                if not card_tier and previous["card_tier"]:
+                # Card tier should not bleed across base fee rows (e.g. standard
+                # vs premium in the same table), only to continuation fragments.
+                if (
+                    not card_tier
+                    and previous["card_tier"]
+                    and _entry_component_hint(entry) not in {"base", "from", "range"}
+                ):
                     card_tier = previous["card_tier"]
 
         card_origin = _card_origin_for_region(card_region, account_country)
