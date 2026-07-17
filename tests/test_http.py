@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
+import httpx
 import pytest
 
 from stripe_fee_crawler.exceptions import ContentSecurityError
@@ -96,3 +100,78 @@ async def test_http_client_detects_login_page() -> None:
     with pytest.raises(AccessChallengeError):
         client._detect_blocking_page(response)
     await client.close()
+
+
+def _make_mock_transport(calls: list[dict[str, Any]], cookie_response: bool = False) -> httpx.MockTransport:
+    count = 0
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal count
+        calls.append({
+            "url": str(request.url),
+            "headers": dict(request.headers),
+        })
+        count += 1
+        if cookie_response and count == 1:
+            return httpx.Response(
+                200,
+                text="pricing",
+                headers={"set-cookie": "session=1; Path=/"},
+            )
+        return httpx.Response(200, text="pricing")
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.asyncio
+async def test_http_client_caches_fresh_responses(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+    transport = _make_mock_transport(calls)
+    config = CrawlConfiguration(
+        max_workers=1,
+        request_delay=0.0,
+        cache_dir=str(tmp_path),
+    )
+    client = HttpClient(config, transport=transport)
+
+    first = await client.get("https://stripe.com/pricing")
+    assert first.status_code == 200
+    assert not first.from_cache
+
+    second = await client.get("https://stripe.com/pricing")
+    assert second.status_code == 200
+    assert second.from_cache
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_http_client_no_cache_bypasses_cache(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+    transport = _make_mock_transport(calls)
+    config = CrawlConfiguration(
+        max_workers=1,
+        request_delay=0.0,
+        cache_dir=str(tmp_path),
+        no_cache=True,
+    )
+    client = HttpClient(config, transport=transport)
+
+    await client.get("https://stripe.com/pricing")
+    await client.get("https://stripe.com/pricing")
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_http_client_cookie_isolation(tmp_path: Path) -> None:
+    calls: list[dict[str, Any]] = []
+    transport = _make_mock_transport(calls, cookie_response=True)
+    config = CrawlConfiguration(
+        max_workers=1,
+        request_delay=0.0,
+        cache_dir=str(tmp_path),
+        no_cache=True,
+    )
+    client = HttpClient(config, transport=transport)
+
+    await client.get("https://stripe.com/pricing")
+    await client.get("https://stripe.com/pricing")
+    assert len(calls) == 2
+    assert calls[1]["headers"].get("Cookie") is None

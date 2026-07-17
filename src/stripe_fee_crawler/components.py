@@ -134,7 +134,14 @@ def _extract_local_payment_method_cards(tree: Any, base_url: str) -> list[Sectio
 
         section_path = [family, heading_text]
         section_id = _section_id_from_path(section_path)
-        body = clean_fee_text(extract_text(card))
+        # Preserve line breaks between paragraphs so split_section_body_into_entries
+        # can separate multi-variant cards (e.g. standard/premium EEA cards).
+        paragraphs: list[str] = []
+        for para in card.iter("p", "li"):
+            text = clean_fee_text(extract_text(para))
+            if text:
+                paragraphs.append(text)
+        body = "\n".join(paragraphs) if paragraphs else clean_fee_text(extract_text(card))
         links = extract_links(card, base_url)
         sections.append(
             Section(

@@ -16,7 +16,10 @@ from .exceptions import ValidationError as CrawlerValidationError
 from .models import (
     ChangeReport,
     CoreFeeEntry,
+    CoreFeeRule,
     CoreFees,
+    FeeComponent,
+    FeeRule,
     Market,
     MarketIndex,
     MarketIndexEntry,
@@ -179,13 +182,19 @@ class OutputPublisher:
         core_entries: list[CoreFeeEntry] = []
         for output in sorted(outputs, key=lambda o: o.market.account_country):
             country = output.market.account_country
-            rules = [r for r in output.derived_rules if r.classification_status == "classified"]
+            rules = [
+                _to_core_fee_rule(r)
+                for r in output.derived_rules
+                if r.classification_status in {"classified", "calculable_rule"}
+            ]
             core_entries.append(
                 CoreFeeEntry(
                     account_country=country,
                     stripe_market_code=output.market.stripe_market_code,
                     locale=output.market.locale,
                     derivation_status=output.derivation_status,
+                    calculator_coverage_status=output.calculator_coverage_status,
+                    coverage_summary=output.coverage_summary,
                     rules=rules,
                     unclassified_count=len(output.unclassified_entries),
                 )
@@ -498,6 +507,69 @@ class OutputPublisher:
         if not parts:
             return False
         return parts[0] in self.MANAGED_PATHS or (len(parts) == 1 and parts[0] in self.MANAGED_PATHS)
+
+
+def _to_core_fee_components(rule: FeeRule) -> list[FeeComponent]:
+    """Build compact fee components from a FeeRule, falling back to legacy flat fields."""
+    if rule.fee_components:
+        return [
+            FeeComponent(
+                type=c.type,
+                value=c.value,
+                amount=c.amount,
+                currency=c.currency,
+                minor_amount=c.minor_amount,
+                basis_points=c.basis_points,
+                schedule_id=c.schedule_id,
+                operator=c.operator,
+            )
+            for c in rule.fee_components
+        ]
+    components: list[FeeComponent] = []
+    if rule.percentage:
+        components.append(
+            FeeComponent(
+                type="percentage",
+                value=rule.percentage,
+                basis_points=rule.basis_points,
+            )
+        )
+    if rule.fixed_amount:
+        components.append(
+            FeeComponent(
+                type="fixed_amount",
+                amount=rule.fixed_amount,
+                currency=rule.fixed_currency,
+                minor_amount=rule.fixed_amount_minor,
+            )
+        )
+    if rule.minimum_amount:
+        components.append(FeeComponent(type="minimum_fee", amount=rule.minimum_amount, currency=rule.fixed_currency))
+    if rule.maximum_amount:
+        components.append(FeeComponent(type="maximum_fee", amount=rule.maximum_amount, currency=rule.fixed_currency))
+    return components
+
+
+def _to_core_fee_rule(rule: FeeRule) -> CoreFeeRule:
+    """Convert an internal FeeRule to a compact, calculator-facing CoreFeeRule."""
+    return CoreFeeRule(
+        rule_id=rule.rule_id,
+        product_id=rule.product_id,
+        variant_id=rule.variant_id,
+        label=rule.label or rule.name,
+        provider=rule.provider,
+        account_country=rule.account_country,
+        channel=rule.channel,
+        payment_method=rule.payment_method,
+        conditions=rule.conditions,
+        fee_components=_to_core_fee_components(rule),
+        unit=rule.unit,
+        behavior=rule.behavior,
+        exactness=rule.exactness,
+        classification_status=rule.classification_status
+        if rule.classification_status in {"classified", "calculable_rule"}
+        else "calculable_rule",
+    )
 
 
 def _family_for_method(method: str) -> str:

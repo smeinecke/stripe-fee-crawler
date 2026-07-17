@@ -12,8 +12,10 @@ from pydantic import ValidationError
 
 from .exceptions import ValidationError as CrawlerValidationError
 from .models import (
+    CoreFeeRule,
     CoreFees,
-    FeeRule,
+    FeeComponent,
+    FeeCondition,
     MarketIndex,
     MarketManifest,
     MarketOutput,
@@ -183,27 +185,44 @@ def validate_all_output(output_dir: str | Path, strict: bool = True, semantic: b
     return {"validated": validated, "errors": errors, "success": not errors}
 
 
-def _validate_rule_currency_exponents(rule: FeeRule, market_code: str, errors: list[str]) -> None:
-    if rule.classification_status != "classified" or not rule.fixed_amount or not rule.fixed_currency:
+def _is_calculable_status(status: str) -> bool:
+    return status in {"classified", "calculable_rule"}
+
+
+def _validate_component_currency_exponents(
+    rule: CoreFeeRule,
+    comp: FeeComponent,
+    market_code: str,
+    errors: list[str],
+) -> None:
+    if comp.type not in {"fixed_amount", "maximum_fee", "minimum_fee", "fixed_surcharge"}:
         return
-    expected_exponent = currency_exponent(rule.fixed_currency)
-    multiplier = 10**expected_exponent
+    if not comp.amount or not comp.currency:
+        return
+    expected_exponent = currency_exponent(comp.currency)
     try:
-        expected_minor = int(Decimal(rule.fixed_amount) * multiplier)
+        expected_minor = int(Decimal(comp.amount) * (10**expected_exponent))
     except Exception:
         errors.append(
-            f"{market_code}/{rule.rule_id}: cannot compute minor units for {rule.fixed_amount} {rule.fixed_currency}"
+            f"{market_code}/{rule.rule_id}: cannot compute minor units for {comp.amount} {comp.currency}"
         )
         return
-    if rule.fixed_amount_minor is None or int(rule.fixed_amount_minor) != expected_minor:
+    if comp.minor_amount is None or int(comp.minor_amount) != expected_minor:
         errors.append(
-            f"{market_code}/{rule.rule_id}: fixed_amount_minor {rule.fixed_amount_minor} does not match "
-            f"{rule.fixed_currency} exponent {expected_exponent} (expected {expected_minor})"
+            f"{market_code}/{rule.rule_id}: minor_amount for {comp.amount} {comp.currency} does not match "
+            f"exponent {expected_exponent} (expected {expected_minor})"
         )
 
 
-def _validate_rule_calculator_ready(rule: FeeRule, market_code: str, errors: list[str]) -> None:
-    if rule.classification_status != "classified":
+def _validate_rule_currency_exponents(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    if not _is_calculable_status(rule.classification_status):
+        return
+    for comp in rule.fee_components:
+        _validate_component_currency_exponents(rule, comp, market_code, errors)
+
+
+def _validate_rule_calculator_ready(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    if not _is_calculable_status(rule.classification_status):
         return
     if not rule.channel:
         errors.append(f"{market_code}/{rule.rule_id}: classified rule missing channel")
@@ -211,20 +230,38 @@ def _validate_rule_calculator_ready(rule: FeeRule, market_code: str, errors: lis
         errors.append(f"{market_code}/{rule.rule_id}: classified rule missing unit")
     if not rule.behavior:
         errors.append(f"{market_code}/{rule.rule_id}: classified rule missing behavior")
-    if not rule.percentage and not rule.fixed_amount:
-        errors.append(f"{market_code}/{rule.rule_id}: classified rule has no percentage or fixed amount")
-
-
-def _validate_rule_percentage_consistency(rule: FeeRule, market_code: str, errors: list[str]) -> None:
-    if not rule.percentage or not rule.basis_points:
+    if not rule.fee_components:
+        errors.append(f"{market_code}/{rule.rule_id}: classified rule has no fee components")
         return
-    try:
-        if Decimal(rule.basis_points) != Decimal(rule.percentage) * Decimal("100"):
-            errors.append(
-                f"{market_code}/{rule.rule_id}: basis_points {rule.basis_points} != percentage {rule.percentage} * 100"
-            )
-    except Exception as exc:
-        errors.append(f"{market_code}/{rule.rule_id}: percentage/basis_points comparison failed: {exc}")
+    calculable_types = {
+        "percentage",
+        "fixed_amount",
+        "percentage_surcharge",
+        "fixed_surcharge",
+        "maximum_fee",
+        "minimum_fee",
+    }
+    if not any(comp.type in calculable_types for comp in rule.fee_components):
+        errors.append(f"{market_code}/{rule.rule_id}: classified rule has no calculable fee component")
+
+
+def _validate_rule_percentage_consistency(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    for comp in rule.fee_components:
+        if comp.type not in {"percentage", "percentage_surcharge"}:
+            continue
+        if not comp.value or not comp.basis_points:
+            continue
+        try:
+            if Decimal(comp.basis_points) != Decimal(comp.value) * Decimal("100"):
+                errors.append(
+                    f"{market_code}/{rule.rule_id}: basis_points {comp.basis_points} != value {comp.value} * 100"
+                )
+        except Exception as exc:
+            errors.append(f"{market_code}/{rule.rule_id}: percentage/basis_points comparison failed: {exc}")
+
+
+def _condition_key(conditions: list[FeeCondition]) -> tuple[tuple[str, str, Any], ...]:
+    return tuple(sorted((c.dimension, c.operator, str(c.value)) for c in conditions))
 
 
 def _validate_core_fees_semantic(
@@ -240,6 +277,7 @@ def _validate_core_fees_semantic(
                 f"core-fees/{entry.account_country}: stripe_market_code {entry.stripe_market_code} "
                 "not present in manifest.markets"
             )
+        seen_identities: dict[tuple[str, str | None, Any], list[str]] = {}
         for rule in entry.rules:
             _validate_rule_currency_exponents(rule, entry.stripe_market_code, errors)
             _validate_rule_calculator_ready(rule, entry.stripe_market_code, errors)
@@ -249,6 +287,13 @@ def _validate_core_fees_semantic(
                 errors.append(
                     f"{entry.stripe_market_code}/{rule.rule_id}: payment_method {rule.payment_method} "
                     "not found in payment-methods catalog"
+                )
+            identity = (rule.product_id or "", rule.variant_id, _condition_key(rule.conditions))
+            seen_identities.setdefault(identity, []).append(rule.rule_id)
+        for identity, rule_ids in seen_identities.items():
+            if len(rule_ids) > 1:
+                errors.append(
+                    f"{entry.stripe_market_code}: semantic identity conflict for {identity}: {rule_ids}"
                 )
     return errors
 
@@ -297,6 +342,30 @@ def validate_semantic(
     return {"success": True, "errors": errors}
 
 
-def validate_data_repository(data_repo_dir: str | Path) -> dict[str, Any]:
+def validate_data_repository(
+    data_repo_dir: str | Path,
+    strict: bool = True,
+    require_all_complete: bool = False,
+) -> dict[str, Any]:
     """Validate the contents of the stripe-fee-data repository."""
-    return validate_all_output(Path(data_repo_dir), strict=True)
+    result = validate_all_output(Path(data_repo_dir), strict=strict, semantic=True)
+    if require_all_complete and result["success"]:
+        core_fees_path = Path(data_repo_dir) / "json" / "core-fees.json"
+        if core_fees_path.exists():
+            with open(core_fees_path, encoding="utf-8") as fh:
+                core_fees = CoreFees.model_validate(json.load(fh))
+            for entry in core_fees.markets:
+                if entry.derivation_status not in {"complete"}:
+                    result["errors"].append(
+                        f"{entry.account_country}: derivation_status is {entry.derivation_status!r}"
+                    )
+                if entry.calculator_coverage_status not in {"complete"}:
+                    result["errors"].append(
+                        f"{entry.account_country}: calculator_coverage_status is {entry.calculator_coverage_status!r}"
+                    )
+        else:
+            result["errors"].append("core-fees.json not found; cannot verify completeness")
+        result["success"] = not result["errors"]
+        if strict and result["errors"]:
+            raise CrawlerValidationError("Repository completeness check failed:\n" + "\n".join(result["errors"]))
+    return result

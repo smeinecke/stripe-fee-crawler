@@ -54,6 +54,10 @@ def _config_from_options(
     strict: bool = False,
     allow_partial: bool = False,
     source_timestamp: str | None = None,
+    cache_dir: str | None = None,
+    cache_ttl_hours: float | None = None,
+    no_cache: bool = False,
+    refresh_cache: bool = False,
 ) -> CrawlConfiguration:
     return CrawlConfiguration(
         markets=list(markets) if markets else None,
@@ -64,7 +68,20 @@ def _config_from_options(
         strict=strict,
         allow_partial=allow_partial,
         source_timestamp_override=source_timestamp,
+        cache_dir=cache_dir or _env_default("STRIPE_FEE_CRAWLER_CACHE_DIR"),
+        cache_ttl_hours=cache_ttl_hours if cache_ttl_hours is not None else float(
+            _env_default("STRIPE_FEE_CRAWLER_CACHE_TTL_HOURS") or "24"
+        ),
+        no_cache=no_cache or bool(_env_default("STRIPE_FEE_CRAWLER_NO_CACHE")),
+        refresh_cache=refresh_cache or bool(_env_default("STRIPE_FEE_CRAWLER_REFRESH_CACHE")),
     )
+
+
+def _env_default(name: str) -> str | None:
+    """Return an environment variable value, treating empty strings as None."""
+    import os
+
+    return os.environ.get(name) or None
 
 
 @main.command(name="discover-markets")
@@ -91,6 +108,10 @@ async def _discover_markets(ctx: click.Context, config: CrawlConfiguration) -> N
 @click.option("--retries", default=3, type=int)
 @click.option("--request-delay", default=1.0, type=float)
 @click.option("--source-timestamp", default=None)
+@click.option("--cache-dir", type=click.Path(), help="Directory for the HTTP response cache.")
+@click.option("--cache-ttl-hours", type=float, help="Cache entry TTL in hours.")
+@click.option("--no-cache", is_flag=True, help="Bypass cache reads and writes.")
+@click.option("--refresh-cache", is_flag=True, help="Force network revalidation/update.")
 @click.pass_context
 def crawl_market_cmd(
     ctx: click.Context,
@@ -103,6 +124,10 @@ def crawl_market_cmd(
     retries: int,
     request_delay: float,
     source_timestamp: str | None,
+    cache_dir: str | None,
+    cache_ttl_hours: float | None,
+    no_cache: bool,
+    refresh_cache: bool,
 ) -> None:
     """Crawl a single market."""
     from .discovery import _payment_methods_url_for, _pricing_url_for, build_market_from_code
@@ -128,6 +153,10 @@ def crawl_market_cmd(
         request_delay=request_delay,
         strict=ctx.obj.get("strict", False),
         source_timestamp=source_timestamp,
+        cache_dir=cache_dir,
+        cache_ttl_hours=cache_ttl_hours,
+        no_cache=no_cache,
+        refresh_cache=refresh_cache,
     )
     config = config.model_copy(update={"offline_fixtures": offline_fixtures})
     asyncio.run(_crawl_market(ctx, config, output_format, market))
@@ -168,6 +197,10 @@ async def _crawl_market(
 @click.option("--source-timestamp", default=None)
 @click.option("--allow-partial", is_flag=True)
 @click.option("--report", type=click.Path(), help="Write machine-readable JSON report to this path.")
+@click.option("--cache-dir", type=click.Path(), help="Directory for the HTTP response cache.")
+@click.option("--cache-ttl-hours", type=float, help="Cache entry TTL in hours.")
+@click.option("--no-cache", is_flag=True, help="Bypass cache reads and writes.")
+@click.option("--refresh-cache", is_flag=True, help="Force network revalidation/update.")
 @click.pass_context
 def crawl_cmd(
     ctx: click.Context,
@@ -182,6 +215,10 @@ def crawl_cmd(
     source_timestamp: str | None,
     allow_partial: bool,
     report: str | None,
+    cache_dir: str | None,
+    cache_ttl_hours: float | None,
+    no_cache: bool,
+    refresh_cache: bool,
 ) -> None:
     """Crawl all markets and publish to the data repository."""
     config = _config_from_options(
@@ -193,6 +230,10 @@ def crawl_cmd(
         strict=ctx.obj.get("strict", False),
         allow_partial=allow_partial,
         source_timestamp=source_timestamp,
+        cache_dir=cache_dir,
+        cache_ttl_hours=cache_ttl_hours,
+        no_cache=no_cache,
+        refresh_cache=refresh_cache,
     )
     asyncio.run(_crawl_all(ctx, config, output, atomic, fail_on_regression, report))
 
@@ -224,11 +265,17 @@ async def _crawl_all(
 
 @main.command(name="validate")
 @click.argument("data_dir", type=click.Path(exists=True))
+@click.option("--strict", is_flag=True, help="Fail on blocking semantic defects.")
+@click.option("--require-all-complete", is_flag=True, help="Reject partial or unclassified markets.")
 @click.pass_context
-def validate_cmd(ctx: click.Context, data_dir: str) -> None:
+def validate_cmd(ctx: click.Context, data_dir: str, strict: bool, require_all_complete: bool) -> None:
     """Validate a stripe-fee-data repository."""
     try:
-        result = validate_data_repository(data_dir)
+        result = validate_data_repository(
+            data_dir,
+            strict=strict,
+            require_all_complete=require_all_complete,
+        )
     except ValidationError as exc:
         click.echo(f"Validation failed: {exc}", err=True)
         sys.exit(ExitCode.VALIDATION_FAILURE)

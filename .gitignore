@@ -51,6 +51,7 @@ htmlcov/
 # Local data
 *.log
 .DS_Store
+.cache/
 
 # Temporary files
 *.tmp

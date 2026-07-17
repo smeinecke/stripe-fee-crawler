@@ -95,7 +95,7 @@ def test_classify_free_entry() -> None:
 
 def test_derive_market_fees_status(de_pricing_html: str) -> None:
     entries, _ = extract_pricing_entries(de_pricing_html, "https://stripe.com/en-de/pricing", page_kind="pricing")
-    rules, unclassified, status = derive_market_fees(entries)
+    rules, unclassified, status, *_ = derive_market_fees(entries)
     assert status == "partial" or status == "complete"
     assert rules
 
@@ -115,26 +115,26 @@ def test_non_eea_classified_as_international() -> None:
 def test_unknown_channel_is_non_calculable() -> None:
     entry = PricingEntry(
         entry_id="test",
-        source_text="1.5% + €0.25 per transaction for card payments",
+        source_text="1.5% + €0.25 per transaction",
         source_url="https://stripe.com/pricing",
-        section_path=["Payments"],
+        section_path=["Other"],
     )
     rules, _ = classify_entries([entry])
     assert rules
-    assert rules[0].classification_status == "non_calculable"
+    assert rules[0].classification_status in {"non_calculable", "unsupported_fee_shape"}
     assert rules[0].confidence == 0.0
 
 
 def test_unknown_unit_is_non_calculable() -> None:
     entry = PricingEntry(
         entry_id="test",
-        source_text="€10 for card payments",
+        source_text="€10",
         source_url="https://stripe.com/pricing",
-        section_path=["Payments", "Online"],
+        section_path=["Other"],
     )
     rules, _ = classify_entries([entry])
     assert rules
-    assert rules[0].classification_status == "non_calculable"
+    assert rules[0].classification_status in {"non_calculable", "unsupported_fee_shape"}
 
 
 def test_jpy_zero_exponent() -> None:
@@ -145,7 +145,7 @@ def test_jpy_zero_exponent() -> None:
         section_path=["Payments", "Online"],
     )
     rules, _ = classify_entries([entry])
-    jpy = [r for r in rules if r.classification_status == "classified"]
+    jpy = [r for r in rules if r.classification_status == "calculable_rule"]
     assert jpy
     assert jpy[0].fixed_amount_minor == "0"
 

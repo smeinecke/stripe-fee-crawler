@@ -157,7 +157,9 @@ class StripeCrawler:
                     )
                 )
 
-        rules, unclassified, derivation_status = derive_market_fees(entries)
+        rules, unclassified, derivation_status, coverage_summary, calculator_coverage_status = derive_market_fees(
+            entries, market=market
+        )
         timestamp = self.config.timestamp or self.config.source_timestamp_override
 
         return MarketOutput(
@@ -171,6 +173,8 @@ class StripeCrawler:
             unclassified_entries=unclassified,
             warnings=warnings,
             derivation_status=derivation_status,
+            calculator_coverage_status=calculator_coverage_status,
+            coverage_summary=coverage_summary,
             transient_failure=transient,
         )
 

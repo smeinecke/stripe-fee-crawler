@@ -115,6 +115,7 @@ def extract_pricing_entries(
     """
     sections = extract_sections(html_text, source_url, page_kind=page_kind)
     entries: list[PricingEntry] = []
+    order = 0
 
     for section in sections:
         phrases = split_section_body_into_entries(section)
@@ -134,21 +135,24 @@ def extract_pricing_entries(
                     section_path=section.section_path,
                     fee_category=fee_category,
                     payment_method=payment_method,
-                    channel=_infer_channel(product, fee_category),
+                    channel=_infer_channel(section.section_path, phrase),
                     source_text=phrase,
                     source_url=source_url,
                     source_evidence=section.body,
                     tokens=tokens,
                     links=section.links,
-                    source_order=section.source_order + index,
+                    source_order=order,
                 )
             )
+            order += 1
     return entries, sections
 
 
 def _infer_payment_method(section: Section, phrase: str) -> str | None:
     """Infer a payment method identifier from the section heading or phrase."""
-    candidates = section.section_path + [phrase]
+    # Phrase-level tokens should win over generic section headings such as
+    # "Terminal" so that "Tap to Pay" is not misidentified as "terminal".
+    candidates = [phrase] + section.section_path
     for text in candidates:
         text = text.lower()
         for method in [
@@ -181,6 +185,7 @@ def _infer_payment_method(section: Section, phrase: str) -> str | None:
             "amazon pay",
             "satispay",
             "konbini",
+            "tap to pay",
             "link",
             "card",
             "terminal",
@@ -190,9 +195,11 @@ def _infer_payment_method(section: Section, phrase: str) -> str | None:
     return None
 
 
-def _infer_channel(product: str | None, fee_category: str | None) -> str | None:
-    text = " ".join(filter(None, [product, fee_category])).lower()
-    if "terminal" in text or "in-person" in text or "tap to pay" in text:
+def _infer_channel(section_path: list[str], phrase: str | None = None) -> str | None:
+    text = " ".join(section_path).lower()
+    if phrase:
+        text += " " + phrase.lower()
+    if "terminal" in text or "in-person" in text or "tap to pay" in text or "reader" in text:
         return "in_person"
     if "online" in text or "checkout" in text or "payment link" in text:
         return "online"

@@ -28,10 +28,15 @@ CURRENCY_SYMBOLS: dict[str, str] = {
     "zł": "PLN",
     "lei": "RON",
     "฿": "THB",
+    "¢": "USD",
+    "p": "GBP",
     "AED": "AED",
     "DKK": "DKK",
     "NOK": "NOK",
 }
+
+
+MINOR_CURRENCY_SYMBOLS: set[str] = {"¢", "p"}
 
 
 CURRENCY_CODES: set[str] = {
@@ -112,7 +117,8 @@ def _normalize_for_parsing(text: str) -> str:
     """Replace common separators and normalize spaces."""
     text = text.replace("\xa0", " ")
     text = re.sub(r"([0-9])\s*%", r"\1%", text)
-    text = re.sub(r"([0-9])\s*([€£$¥])", r"\1\2", text)
+    # Currency-symbol spacing is handled by regex; do not collapse here because
+    # multi-character symbols such as "A$" are parsed correctly with \s*.
     return text
 
 
@@ -163,88 +169,86 @@ def currency_exponent(currency: str) -> int:
     return CURRENCY_EXPONENTS.get(currency.upper(), 2)
 
 
+def _normalize_minor_amount(amount: Decimal, amount_text: str, symbol: str) -> tuple[Decimal, bool]:
+    """Convert minor-currency symbols (¢, p) to major units when appropriate."""
+    if symbol not in MINOR_CURRENCY_SYMBOLS:
+        return amount, False
+    # If the raw amount text already contains a decimal separator, assume it is
+    # already in major units and should not be divided again.
+    if "." in amount_text or "," in amount_text:
+        return amount, True
+    return amount / Decimal("100"), True
+
+
 def _extract_currency_and_amount(text: str) -> list[dict[str, Any]]:
-    """Extract all currency-amount pairs from a fee phrase."""
-    results: list[dict[str, Any]] = []
-    # Look for symbols immediately followed by a number (prefix notation).
-    symbol_pattern = "|".join(re.escape(s) for s in CURRENCY_SYMBOLS)
-    pattern = rf"(?P<symbol>{symbol_pattern})(?P<amount>[0-9][0-9\s,.]*)"
-    for match in re.finditer(pattern, text):
-        symbol = match.group("symbol")
-        amount_text = match.group("amount").replace(" ", "")
-        amount = _parse_decimal(amount_text)
-        if amount is not None:
-            results.append(
-                {
-                    "symbol": symbol,
-                    "currency": _currency_for_symbol(symbol),
-                    "amount_text": amount_text,
-                    "amount": str(amount),
-                }
-            )
-    # Look for symbols immediately preceded by a number (suffix notation).
-    pattern = rf"(?P<amount>[0-9][0-9\s,.]*)(?P<symbol>{symbol_pattern})"
-    for match in re.finditer(pattern, text):
-        symbol = match.group("symbol")
-        amount_text = match.group("amount").replace(" ", "")
-        amount = _parse_decimal(amount_text)
-        if amount is not None:
-            results.append(
-                {
-                    "symbol": symbol,
-                    "currency": _currency_for_symbol(symbol),
-                    "amount_text": amount_text,
-                    "amount": str(amount),
-                }
-            )
-    # Look for currency codes followed by a number.
+    """Extract all currency-amount pairs from a fee phrase.
+
+    Supports prefix/suffix symbols and ISO codes, optional whitespace, and
+    minor-currency symbols such as ``20p`` (0.20 GBP) and ``5¢`` (0.05 USD).
+    """
+    symbol_pattern = "|".join(re.escape(s) for s in sorted(CURRENCY_SYMBOLS, key=len, reverse=True))
     code_pattern = "|".join(re.escape(c) for c in CURRENCY_CODES)
-    pattern = rf"(?P<code>{code_pattern})\s*(?P<amount>[0-9][0-9\s,.]*)"
-    for match in re.finditer(pattern, text):
-        code = match.group("code")
-        amount_text = match.group("amount").replace(" ", "")
-        amount = _parse_decimal(amount_text)
-        if amount is not None:
-            results.append(
-                {
-                    "symbol": code,
-                    "currency": code,
-                    "amount_text": amount_text,
-                    "amount": str(amount),
-                }
-            )
-    # Look for currency codes preceded by a number.
-    pattern = rf"(?P<amount>[0-9][0-9\s,.]*)\s*(?P<code>{code_pattern})"
-    for match in re.finditer(pattern, text):
-        code = match.group("code")
-        amount_text = match.group("amount").replace(" ", "")
-        amount = _parse_decimal(amount_text)
-        if amount is not None:
-            results.append(
-                {
-                    "symbol": code,
-                    "currency": code,
-                    "amount_text": amount_text,
-                    "amount": str(amount),
-                }
-            )
+    patterns: list[tuple[str, str, str]] = [
+        ("symbol_prefix", rf"(?P<symbol>{symbol_pattern})\s*(?P<amount>[0-9][0-9\s,.]*)", "symbol"),
+        ("symbol_suffix", rf"(?P<amount>[0-9][0-9\s,.]*)\s*(?P<symbol>{symbol_pattern})", "symbol"),
+        ("code_prefix", rf"(?P<code>{code_pattern})\s*(?P<amount>[0-9][0-9\s,.]*)", "code"),
+        ("code_suffix", rf"(?P<amount>[0-9][0-9\s,.]*)\s*(?P<code>{code_pattern})", "code"),
+    ]
+    seen_spans: list[tuple[int, int]] = []
+    results: list[tuple[int, int, dict[str, Any]]] = []
+
+    for _match_type, pattern, group in patterns:
+        for match in re.finditer(pattern, text):
+            span = match.span()
+            # Skip overlaps with already-selected matches.
+            if any(span[0] < end and span[1] > start for start, end in seen_spans):
+                continue
+            symbol_or_code = match.group(group)
+            amount_text = match.group("amount").replace(" ", "")
+            amount = _parse_decimal(amount_text)
+            if amount is None:
+                continue
+            currency = _currency_for_symbol(symbol_or_code) if group == "symbol" else symbol_or_code
+            is_minor = False
+            if group == "symbol" and symbol_or_code in MINOR_CURRENCY_SYMBOLS:
+                amount, is_minor = _normalize_minor_amount(amount, amount_text, symbol_or_code)
+            results.append((span[0], span[1], {
+                "symbol": symbol_or_code,
+                "currency": currency,
+                "amount_text": amount_text,
+                "amount": str(amount),
+                "is_minor": is_minor,
+            }))
+            seen_spans.append(span)
+
+    results.sort(key=lambda r: (r[0], r[1] - r[0]), reverse=True)
+    deduped: list[dict[str, Any]] = []
+    used: set[tuple[int, int]] = set()
+    for start, end, data in results:
+        if (start, end) in used:
+            continue
+        if any(start < u_end and end > u_start for u_start, u_end in used):
+            continue
+        used.add((start, end))
+        deduped.append(data)
+    deduped.reverse()
+    return deduped
+
+
+def _extract_percentage(text: str) -> list[dict[str, Any]]:
+    """Extract all percentages from a fee phrase."""
+    results: list[dict[str, Any]] = []
+    for match in re.finditer(r"(?P<value>[0-9]+(?:[.,][0-9]+)?)\s*%", text):
+        value_text = match.group("value").replace(" ", "")
+        value = _parse_decimal(value_text)
+        if value is None:
+            continue
+        results.append({
+            "percentage_text": value_text,
+            "percentage": str(value),
+            "basis_points": _to_basis_points(value),
+        })
     return results
-
-
-def _extract_percentage(text: str) -> dict[str, Any] | None:
-    """Extract a percentage from a fee phrase."""
-    match = re.search(r"(?P<value>[0-9]+(?:[.,][0-9]+)?)\s*%", text)
-    if not match:
-        return None
-    value_text = match.group("value").replace(" ", "")
-    value = _parse_decimal(value_text)
-    if value is None:
-        return None
-    return {
-        "percentage_text": value_text,
-        "percentage": str(value),
-        "basis_points": _to_basis_points(value),
-    }
 
 
 def _extract_exactness(text: str) -> str | None:
@@ -286,10 +290,10 @@ def tokenize_fee_text(text: str) -> list[FeeToken]:
                 operator="+" if "+" in text else None,
                 exactness=_extract_exactness(text),
                 token_id=token_id,
+                is_minor_currency=amount.get("is_minor", False),
             )
         )
-    pct = _extract_percentage(text)
-    if pct:
+    for pct in _extract_percentage(text):
         token_id = hashlib.sha256(f"percentage:{pct['percentage']}".encode()).hexdigest()[:16]
         tokens.append(
             FeeToken(

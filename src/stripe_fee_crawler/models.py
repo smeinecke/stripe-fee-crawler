@@ -108,6 +108,20 @@ class Link(BaseModel):
     uri: str | None = None
 
 
+class CacheStats(BaseModel):
+    """HTTP cache statistics for a crawl run."""
+
+    model_config = ConfigDict(extra="ignore", frozen=True)
+
+    cache_hits: int = 0
+    cache_misses: int = 0
+    cache_revalidations: int = 0
+    cache_304_responses: int = 0
+    cache_writes: int = 0
+    cache_errors: int = 0
+    bytes_avoided: int = 0
+
+
 class FeeToken(BaseModel):
     """A normalized pricing token extracted from a fee phrase."""
 
@@ -124,6 +138,44 @@ class FeeToken(BaseModel):
     exactness: str | None = None
     token_id: str | None = None
     note: str | None = None
+    is_minor_currency: bool = False
+
+
+class FeeComponent(BaseModel):
+    """One calculable or descriptive component of a fee formula."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: str
+    value: str | None = None
+    amount: str | None = None
+    currency: str | None = None
+    minor_amount: str | None = None
+    basis_points: str | None = None
+    schedule_id: str | None = None
+    operator: str | None = None
+    source_text: str | None = None
+    source_entry_id: str | None = None
+
+    @field_validator("type")
+    @classmethod
+    def _type_allowed(cls, value: str) -> str:
+        allowed = {
+            "percentage",
+            "fixed_amount",
+            "maximum_fee",
+            "minimum_fee",
+            "percentage_surcharge",
+            "fixed_surcharge",
+            "included",
+            "free",
+            "tiered",
+            "custom_pricing",
+            "non_calculable",
+        }
+        if value not in allowed:
+            raise ValueError(f"fee component type must be one of {allowed}")
+        return value
 
 
 class Section(BaseModel):
@@ -165,6 +217,7 @@ class PricingEntry(BaseModel):
     tokens: list[FeeToken] = Field(default_factory=list)
     links: list[Link] = Field(default_factory=list)
     source_order: int = 0
+    context: dict[str, Any] = Field(default_factory=dict)
     classification_status: str = "unclassified"
     confidence: float = 0.0
     classification_evidence: list[str] = Field(default_factory=list)
@@ -172,7 +225,23 @@ class PricingEntry(BaseModel):
     @field_validator("classification_status")
     @classmethod
     def _status_allowed(cls, value: str) -> str:
-        allowed = {"classified", "unclassified", "non_calculable", "partial"}
+        allowed = {
+            "classified",
+            "unclassified",
+            "non_calculable",
+            "partial",
+            "calculable_rule",
+            "reference_only",
+            "included",
+            "free",
+            "custom_pricing",
+            "informational",
+            "unsupported_fee_shape",
+            "unclassified_fee_candidate",
+            "ignored_non_fee",
+            "ambiguous",
+            "conflict",
+        }
         if value not in allowed:
             raise ValueError(f"classification_status must be one of {allowed}")
         return value
@@ -200,12 +269,20 @@ class FeeRule(BaseModel):
     Money amounts are represented as exact decimal strings in major units
     together with a currency code. Percentage rates are represented as exact
     decimal strings and as basis points for unambiguous computation.
+
+    A rule is identified by ``product_id + variant_id + conditions``. The
+    display ``label`` and localized source text are not part of semantic
+    identity.
     """
 
     model_config = ConfigDict(frozen=True)
 
     rule_id: str
     entry_id: str | None = None
+    contributing_entry_ids: list[str] = Field(default_factory=list)
+    product_id: str | None = None
+    variant_id: str | None = None
+    label: str | None = None
     name: str | None = None
     provider: str = "stripe"
     account_country: str | None = None
@@ -236,8 +313,11 @@ class FeeRule(BaseModel):
     behavior: str = "additive"
     conditions: list[FeeCondition] = Field(default_factory=list)
     additional_fees: list[str] = Field(default_factory=list)
+    fee_components: list[FeeComponent] = Field(default_factory=list)
     source_text: str | None = None
+    source_texts: list[str] = Field(default_factory=list)
     source_url: str | None = None
+    source_fragments: list[dict[str, Any]] = Field(default_factory=list)
     classification_status: str = "unclassified"
     confidence: float = 0.0
     classification_evidence: list[str] = Field(default_factory=list)
@@ -276,10 +356,60 @@ class FeeRule(BaseModel):
             raise ValueError(f"behavior must be one of {allowed}")
         return value
 
+    @field_validator("classification_status")
+    @classmethod
+    def _classification_status_allowed(cls, value: str) -> str:
+        allowed = {
+            "classified",
+            "unclassified",
+            "non_calculable",
+            "partial",
+            "calculable_rule",
+            "reference_only",
+            "included",
+            "free",
+            "custom_pricing",
+            "informational",
+            "unsupported_fee_shape",
+            "unclassified_fee_candidate",
+            "ignored_non_fee",
+            "ambiguous",
+            "conflict",
+        }
+        if value not in allowed:
+            raise ValueError(f"classification_status must be one of {allowed}")
+        return value
+
     @field_validator("confidence")
     @classmethod
     def _confidence_range(cls, value: float) -> float:
         return max(0.0, min(1.0, float(value)))
+
+    @model_validator(mode="after")
+    def _sync_legacy_fields(self) -> FeeRule:
+        """Keep legacy flat fields in sync with fee_components when possible."""
+        if not self.fee_components:
+            return self
+        pct = next((c for c in self.fee_components if c.type == "percentage"), None)
+        fixed = next((c for c in self.fee_components if c.type == "fixed_amount"), None)
+        max_fee = next((c for c in self.fee_components if c.type == "maximum_fee"), None)
+        min_fee = next((c for c in self.fee_components if c.type == "minimum_fee"), None)
+        updates: dict[str, Any] = {}
+        if pct and not self.percentage:
+            updates["percentage"] = pct.value
+        if pct and not self.basis_points:
+            updates["basis_points"] = pct.basis_points
+        if fixed and not self.fixed_amount:
+            updates["fixed_amount"] = fixed.amount
+        if fixed and not self.fixed_currency:
+            updates["fixed_currency"] = fixed.currency
+        if max_fee and not self.maximum_amount:
+            updates["maximum_amount"] = max_fee.amount
+        if min_fee and not self.minimum_amount:
+            updates["minimum_amount"] = min_fee.amount
+        if updates:
+            return self.model_copy(update=updates)
+        return self
 
 
 class ParserWarning(BaseModel):
@@ -290,6 +420,25 @@ class ParserWarning(BaseModel):
     code: str
     message: str
     context: dict[str, Any] | None = None
+
+
+class CoverageSummary(BaseModel):
+    """Summary of how source pricing records were classified."""
+
+    model_config = ConfigDict(frozen=True)
+
+    source_entries: int = 0
+    calculable_rules: int = 0
+    non_calculable_rules: int = 0
+    numeric_fee_candidates: int = 0
+    unclassified_fee_candidates: int = 0
+    ambiguous_entries: int = 0
+    conflicting_rule_identities: int = 0
+    unsupported_fee_shapes: int = 0
+    ignored_non_fee: int = 0
+    reference_only: int = 0
+    included: int = 0
+    custom_pricing: int = 0
 
 
 class MarketOutput(BaseModel):
@@ -307,6 +456,8 @@ class MarketOutput(BaseModel):
     unclassified_entries: list[PricingEntry] = Field(default_factory=list)
     warnings: list[ParserWarning] = Field(default_factory=list)
     derivation_status: str = "unclassified"
+    calculator_coverage_status: str = "unclassified"
+    coverage_summary: CoverageSummary = Field(default_factory=CoverageSummary)
     transient_failure: bool = False
     unsupported_reason: str | None = None
 
@@ -316,6 +467,14 @@ class MarketOutput(BaseModel):
         allowed = {"complete", "partial", "unclassified", "failed"}
         if value not in allowed:
             raise ValueError(f"derivation_status must be one of {allowed}")
+        return value
+
+    @field_validator("calculator_coverage_status")
+    @classmethod
+    def _calculator_coverage_status_allowed(cls, value: str) -> str:
+        allowed = {"complete", "partial", "unclassified", "failed", "not_calculable"}
+        if value not in allowed:
+            raise ValueError(f"calculator_coverage_status must be one of {allowed}")
         return value
 
 
@@ -331,6 +490,7 @@ class MarketIndexEntry(BaseModel):
     source_urls: list[str] = Field(default_factory=list)
     source_updated_at: str | None = None
     derivation_status: str | None = None
+    calculator_coverage_status: str | None = None
     content_sha256: str | None = None
     schema_version: int = 1
 
@@ -392,6 +552,59 @@ class MarketManifest(BaseModel):
     transient_failures: list[UnsupportedMarket] = Field(default_factory=list)
 
 
+class CoreFeeRule(BaseModel):
+    """A compact, calculator-facing fee rule without provenance."""
+
+    model_config = ConfigDict(frozen=True)
+
+    rule_id: str
+    product_id: str | None = None
+    variant_id: str | None = None
+    label: str | None = None
+    provider: str = "stripe"
+    account_country: str | None = None
+    channel: str | None = None
+    payment_method: str | None = None
+    conditions: list[FeeCondition] = Field(default_factory=list)
+    fee_components: list[FeeComponent] = Field(default_factory=list)
+    unit: str = "per_transaction"
+    behavior: str = "additive"
+    classification_status: str = "unclassified"
+    exactness: str = "exact"
+
+    @field_validator("classification_status")
+    @classmethod
+    def _classification_status_allowed(cls, value: str) -> str:
+        allowed = {
+            "classified",
+            "unclassified",
+            "non_calculable",
+            "partial",
+            "calculable_rule",
+            "reference_only",
+            "included",
+            "free",
+            "custom_pricing",
+            "informational",
+            "unsupported_fee_shape",
+            "unclassified_fee_candidate",
+            "ignored_non_fee",
+            "ambiguous",
+            "conflict",
+        }
+        if value not in allowed:
+            raise ValueError(f"classification_status must be one of {allowed}")
+        return value
+
+    @field_validator("exactness")
+    @classmethod
+    def _exactness_allowed(cls, value: str) -> str:
+        allowed = {"exact", "from", "range", "tiered", "included", "free", "custom", "non_calculable"}
+        if value not in allowed:
+            raise ValueError(f"exactness must be one of {allowed}")
+        return value
+
+
 class CoreFeeEntry(BaseModel):
     """A single market's confidently derived core fees."""
 
@@ -401,7 +614,9 @@ class CoreFeeEntry(BaseModel):
     stripe_market_code: str
     locale: str
     derivation_status: str
-    rules: list[FeeRule] = Field(default_factory=list)
+    calculator_coverage_status: str = "unclassified"
+    coverage_summary: CoverageSummary = Field(default_factory=CoverageSummary)
+    rules: list[CoreFeeRule] = Field(default_factory=list)
     unclassified_count: int = 0
 
     @field_validator("account_country")
@@ -418,6 +633,14 @@ class CoreFeeEntry(BaseModel):
         allowed = {"complete", "partial", "unclassified", "failed"}
         if value not in allowed:
             raise ValueError(f"derivation_status must be one of {allowed}")
+        return value
+
+    @field_validator("calculator_coverage_status")
+    @classmethod
+    def _calculator_coverage_status_allowed(cls, value: str) -> str:
+        allowed = {"complete", "partial", "unclassified", "failed", "not_calculable"}
+        if value not in allowed:
+            raise ValueError(f"calculator_coverage_status must be one of {allowed}")
         return value
 
 
@@ -524,7 +747,14 @@ class ChangeReport(BaseModel):
             "sharp_market_drop",
             "classified_to_unclassified",
             "fee_value_disappeared",
+            "fee_component_disappeared",
+            "condition_changed",
+            "cap_changed",
+            "classification_status_regression",
+            "calculable_to_non_calculable",
             "duplicate_identifier",
+            "duplicate_identity",
+            "market_coverage_changed",
             "currency_changed",
             "source_url_changed",
             "large_percentage_change",
@@ -556,6 +786,8 @@ class CrawlReport(BaseModel):
     warnings: list[ParserWarning] = Field(default_factory=list)
     change_report_path: str | None = None
     diagnostics_path: str | None = None
+    cache_stats: CacheStats = Field(default_factory=CacheStats)
+    coverage_summary: CoverageSummary = Field(default_factory=CoverageSummary)
 
     @model_validator(mode="before")
     @classmethod
@@ -596,6 +828,10 @@ class CrawlConfiguration(BaseModel):
     market_manifest_path: str | None = None
     offline_fixtures: dict[str, str] | None = None
     source_timestamp_override: str | None = None
+    cache_dir: str | None = None
+    cache_ttl_hours: float = 24.0
+    no_cache: bool = False
+    refresh_cache: bool = False
 
     @field_validator("max_workers")
     @classmethod
@@ -617,4 +853,11 @@ class CrawlConfiguration(BaseModel):
         allowed = {"preserve", "fail", "ignore"}
         if value not in allowed:
             raise ValueError(f"transient_policy must be one of {allowed}")
+        return value
+
+    @field_validator("cache_ttl_hours")
+    @classmethod
+    def _cache_ttl_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("cache_ttl_hours must be positive")
         return value

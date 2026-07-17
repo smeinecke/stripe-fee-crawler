@@ -10,7 +10,10 @@ import pytest
 from stripe_fee_crawler.exceptions import ValidationError as CrawlerValidationError
 from stripe_fee_crawler.models import (
     CoreFeeEntry,
+    CoreFeeRule,
     CoreFees,
+    FeeComponent,
+    FeeCondition,
     FeeRule,
     Market,
     MarketManifest,
@@ -148,6 +151,30 @@ def test_generated_schemas_have_id(generator, schema_id: str) -> None:
     assert schema_id in schema["$id"]
 
 
+def _valid_core_rule(**overrides: Any) -> CoreFeeRule:
+
+    return CoreFeeRule(
+        rule_id="r1",
+        product_id="payments",
+        variant_id="online_domestic_cards",
+        label="card_payment",
+        provider="stripe",
+        account_country="DE",
+        channel="online",
+        payment_method="card",
+        conditions=[FeeCondition(dimension="card_origin", value="domestic")],
+        fee_components=[
+            FeeComponent(type="percentage", value="1.5", basis_points="150"),
+            FeeComponent(type="fixed_amount", amount="0.25", currency="EUR", minor_amount="25"),
+        ],
+        unit="per_transaction",
+        exactness="exact",
+        behavior="conditional",
+        classification_status="calculable_rule",
+        **overrides,
+    )
+
+
 def _valid_rule(**overrides: Any) -> FeeRule:
     return FeeRule(
         rule_id="r1",
@@ -181,7 +208,7 @@ def test_semantic_validation_passes() -> None:
         url_prefix="https://stripe.com/en-de",
         status="supported",
     )
-    rule = _valid_rule()
+    rule = _valid_core_rule()
     core_fees = CoreFees(
         markets=[
             CoreFeeEntry(
@@ -202,6 +229,7 @@ def test_semantic_validation_passes() -> None:
 
 
 def test_semantic_validation_fails_bad_currency_exponent() -> None:
+
     market = Market(
         stripe_market_code="de",
         account_country="DE",
@@ -211,25 +239,22 @@ def test_semantic_validation_fails_bad_currency_exponent() -> None:
         status="supported",
     )
     # JPY has exponent 0, so 1.0 JPY should be minor=1, not 100.
-    rule = FeeRule(
+    rule = CoreFeeRule(
         rule_id="r1",
-        entry_id="e1",
-        name="card_payment",
+        product_id="payments",
+        variant_id="online_domestic_cards",
         provider="stripe",
+        account_country="DE",
         channel="online",
         payment_method="card",
-        percentage="1.5",
-        basis_points="150",
-        fixed_amount="1.0",
-        fixed_amount_minor="100",
-        fixed_currency="JPY",
+        fee_components=[
+            FeeComponent(type="percentage", value="1.5", basis_points="150"),
+            FeeComponent(type="fixed_amount", amount="1.0", currency="JPY", minor_amount="100"),
+        ],
         unit="per_transaction",
         exactness="exact",
         behavior="conditional",
-        source_text="1.5% + ¥1",
-        source_url="https://stripe.com/pricing",
-        classification_status="classified",
-        confidence=0.85,
+        classification_status="calculable_rule",
     )
     core_fees = CoreFees(
         markets=[
@@ -252,7 +277,7 @@ def test_semantic_validation_fails_bad_currency_exponent() -> None:
 
 
 def test_semantic_validation_fails_missing_market() -> None:
-    rule = _valid_rule()
+    rule = _valid_core_rule()
     core_fees = CoreFees(
         markets=[
             CoreFeeEntry(
