@@ -302,3 +302,49 @@ def test_semantic_validation_fails_missing_market() -> None:
     with pytest.raises(CrawlerValidationError) as excinfo:
         validate_semantic("/unused", core_fees=core_fees, manifest=manifest, payment_methods=payment_methods)
     assert "manifest" in str(excinfo.value).lower()
+
+
+def test_semantic_validation_fails_on_contradictory_fee_evidence() -> None:
+    """A calculable rule must not mix positive-fee and included/free evidence."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "fee_evidence": FeeEvidence(
+                type="explicit_fee_phrase",
+                phrases=[
+                    "30%",
+                    "Included with Payments",
+                    "Included at no additional charge for businesses on standard payments pricing",
+                ],
+                confidence=0.85,
+            )
+        }
+    )
+    core_fees = CoreFees(
+        markets=[
+            CoreFeeEntry(
+                account_country="AE",
+                stripe_market_code="ae",
+                locale="en-ae",
+                derivation_status="complete",
+                rules=[rule],
+            )
+        ]
+    )
+    manifest = MarketManifest(
+        markets=[
+            Market(
+                stripe_market_code="ae",
+                account_country="AE",
+                country_name="United Arab Emirates",
+                locale="en-ae",
+                url_prefix="https://stripe.com/ae",
+                status="supported",
+            )
+        ]
+    )
+    payment_methods = PaymentMethodCatalog(
+        methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")]
+    )
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic("/unused", core_fees=core_fees, manifest=manifest, payment_methods=payment_methods)
+    assert "included/free evidence" in str(excinfo.value).lower()

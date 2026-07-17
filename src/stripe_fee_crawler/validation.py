@@ -320,14 +320,25 @@ def _label_references_component(
     # Direct amount string match (e.g. "0.25" or "0,25").
     if amount in lower:
         return True
-    # Try parsing numeric tokens in the label and compare value.
+    # Try parsing numeric tokens in the label and compare value.  Labels may
+    # use either comma or dot as the decimal separator and commas as thousands
+    # separators, so normalise carefully before comparing.
     amount_dec = Decimal(amount) if re.match(r"^[0-9.,]+$", amount) else None
     if amount_dec is not None:
         for match in re.finditer(r"[0-9][0-9\s,.]*", lower):
-            candidate = match.group().replace(" ", "").replace(",", ".")
+            candidate = match.group().replace(" ", "")
             try:
-                if Decimal(candidate) == amount_dec:
-                    return True
+                if "," in candidate and "." in candidate:
+                    # e.g. "1,000.00" -> comma is a thousands separator.
+                    if Decimal(candidate.replace(",", "")) == amount_dec:
+                        return True
+                elif "," in candidate and "." not in candidate:
+                    # e.g. "0,25" -> comma is the decimal separator.
+                    if Decimal(candidate.replace(",", ".")) == amount_dec:
+                        return True
+                else:
+                    if Decimal(candidate) == amount_dec:
+                        return True
             except Exception:  # nosec B110
                 pass
     # For minor-currency amounts the label may contain the raw minor text ("20p").
@@ -406,6 +417,7 @@ def _validate_rule_calculator_ready(rule: CoreFeeRule, market_code: str, errors:
         "hardware_price",
         "alphanumeric_method_name",
         "insufficient",
+        "contradictory_fee_evidence",
     }
     if evidence is None:
         errors.append(f"{market_code}/{rule.rule_id}: calculable rule has no fee_evidence")
@@ -427,11 +439,17 @@ def _validate_rule_calculator_ready(rule: CoreFeeRule, market_code: str, errors:
         (Decimal(c.amount) for c in fixed_components if c.amount),
         default=Decimal("0"),
     )
+    largest_fixed_minor = max(
+        (Decimal(c.minor_amount) for c in fixed_components if c.minor_amount),
+        default=Decimal("0"),
+    )
 
     if rule.unit == "yearly" and (evidence is None or evidence.type not in positive_evidence_types):
         errors.append(f"{market_code}/{rule.rule_id}: yearly rule lacks explicit fee evidence")
 
-    if rule.unit == "per_transaction" and largest_fixed >= Decimal("10") and not has_percentage:
+    # Flag fixed-only per-transaction amounts that are implausibly large in
+    # minor units (roughly USD 10+ equivalent).
+    if rule.unit == "per_transaction" and largest_fixed_minor >= Decimal("1000") and not has_percentage:
         errors.append(
             f"{market_code}/{rule.rule_id}: large one-time fixed amount {largest_fixed} labeled per_transaction"
         )
@@ -456,6 +474,31 @@ def _validate_rule_calculator_ready(rule: CoreFeeRule, market_code: str, errors:
                     errors.append(
                         f"{market_code}/{rule.rule_id}: source label does not reference currency {comp.currency}"
                     )
+
+
+def _validate_rule_contradictory_evidence(
+    rule: CoreFeeRule,
+    market_code: str,
+    errors: list[str],
+) -> None:
+    """Reject calculable rules that mix positive-fee and included/free evidence."""
+    if not _is_calculable_status(rule.classification_status):
+        return
+    if rule.fee_evidence and rule.fee_evidence.type == "contradictory_fee_evidence":
+        errors.append(f"{market_code}/{rule.rule_id}: calculable rule has contradictory fee evidence")
+        return
+    label = (rule.label or "").lower()
+    evidence_phrases = [p.lower() for p in (rule.fee_evidence.phrases if rule.fee_evidence else [])]
+    combined = f"{label} {' '.join(evidence_phrases)}"
+    has_positive_fee = bool(re.search(r"[0-9]\s*%|[0-9]\s*[€£$¥A-Z]", combined))
+    has_included_free = bool(
+        re.search(
+            r"(?<!\bnot\s)\bincluded\b|(?<!\bnot\s)\bfree\b|\bno additional charge\b|\bat no cost\b|\bno cost\b|\bno fee\b",
+            combined,
+        )
+    )
+    if has_positive_fee and has_included_free:
+        errors.append(f"{market_code}/{rule.rule_id}: calculable rule combines positive fee and included/free evidence")
 
 
 def _validate_rule_percentage_consistency(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
@@ -494,6 +537,7 @@ def _validate_core_fees_semantic(
         for rule in entry.rules:
             _validate_rule_currency_exponents(rule, entry.stripe_market_code, errors)
             _validate_rule_calculator_ready(rule, entry.stripe_market_code, errors)
+            _validate_rule_contradictory_evidence(rule, entry.stripe_market_code, errors)
             _validate_rule_percentage_consistency(rule, entry.stripe_market_code, errors)
             known_methods = {m.method_id for m in payment_methods.methods}
             if rule.payment_method and rule.payment_method not in known_methods:

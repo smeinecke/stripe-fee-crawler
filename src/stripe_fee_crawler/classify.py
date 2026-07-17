@@ -17,7 +17,7 @@ from .models import (
     PricingEntry,
 )
 from .normalize import stable_id
-from .pricing_tokens import currency_exponent, parse_fee_value
+from .pricing_tokens import CURRENCY_CODES, CURRENCY_SYMBOLS, currency_exponent, parse_fee_value
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,6 @@ _MARKETING_TERMS: tuple[str, ...] = (
     "rankings",
     "100+",
     "100 +",
-    "% of",
     "percent of",
     "percentage of",
     "year",
@@ -289,11 +288,36 @@ def _is_amount_from_method_name(
         if comp.type in {"fixed_amount", "fixed_surcharge", "maximum_fee", "minimum_fee"} and comp.amount:
             # If the amount text appears right after an alphabetic payment-method
             # token (e.g. "P24" -> "24"), it is not a real fee amount.
-            # Use the original raw text if present; otherwise look for the amount.
+            # Ignore amounts preceded by a currency symbol or ISO code.
             raw = comp.source_text or text or ""
-            if raw and re.search(r"[a-z]\s*" + re.escape(comp.amount) + r"\b", raw, re.IGNORECASE):
-                return True
+            if not raw:
+                continue
+            for match in re.finditer(re.escape(comp.amount) + r"\b", raw):
+                prefix = raw[: match.start()].rstrip()
+                if not prefix:
+                    continue
+                token = prefix.split()[-1]
+                if token.upper() in CURRENCY_CODES or token in CURRENCY_SYMBOLS:
+                    continue
+                if re.fullmatch(r"[A-Za-z]+", token):
+                    return True
     return False
+
+
+def _has_contradictory_fee_evidence(fee_components: list[FeeComponent]) -> bool:
+    """Detect positive-fee evidence paired with included/free evidence."""
+    component_types = {c.type for c in fee_components}
+    positive_types = {
+        "percentage",
+        "fixed_amount",
+        "percentage_surcharge",
+        "fixed_surcharge",
+        "maximum_fee",
+        "minimum_fee",
+    }
+    has_positive = bool(component_types & positive_types)
+    has_included_free = bool(component_types & {"included", "free"})
+    return has_positive and has_included_free
 
 
 def _fee_evidence_for_group(
@@ -344,7 +368,17 @@ def _fee_evidence_for_group(
             confidence=0.0,
         )
 
-    # 5. A real fee needs explicit fee language, a trusted table heading with a
+    # 5. Positive fee evidence paired with included/free evidence in the same
+    #    logical row is contradictory; the included/free statement wins.
+    if _has_contradictory_fee_evidence(fee_components):
+        return FeeEvidence(
+            type="contradictory_fee_evidence",
+            source_entry_ids=entry_ids,
+            phrases=phrases,
+            confidence=0.0,
+        )
+
+    # 6. A real fee needs explicit fee language, a trusted table heading with a
     #    fee formula, or an unconditional per-event/per-period phrase.
     if _is_explicit_fee_phrase(combined):
         return FeeEvidence(
@@ -562,6 +596,14 @@ def _infer_exactness(parsed: dict[str, Any], phrase: str) -> str:
         return "included"
     if "free" in lower or "no fee" in lower:
         return "free"
+    # A concrete fee with "custom pricing" wording is an explicitly scoped paid
+    # variant, not a custom-quote exactness.
+    if (
+        exactness == "custom"
+        and (parsed.get("percentage") or parsed.get("fixed_amount"))
+        and _is_explicit_fee_phrase(phrase)
+    ):
+        return "exact"
     return exactness
 
 
@@ -601,9 +643,9 @@ def _infer_conditions(
     if "instant settlement" in text or "instant payout" in text:
         conditions.append(FeeCondition(dimension="settlement_timing", value="instant"))
 
-    if "won disputes" in combined or "won" in text and "dispute" in combined:
+    if "won disputes" in combined or "dispute" in combined and re.search(r"\b(won|win)\b", text):
         conditions.append(FeeCondition(dimension="dispute_state", value="won"))
-    elif "lost disputes" in combined or "lost" in text and "dispute" in combined:
+    elif "lost disputes" in combined or "dispute" in combined and re.search(r"\blost\b", text):
         conditions.append(FeeCondition(dimension="dispute_state", value="lost"))
     elif "received" in combined and "dispute" in combined:
         conditions.append(FeeCondition(dimension="dispute_state", value="received"))
@@ -1022,7 +1064,9 @@ def _classify_group(
         classification_status = CUSTOM_PRICING
     elif fee_evidence.type in {"marketing_prose", "hardware_price", "alphanumeric_method_name"}:
         classification_status = INFORMATIONAL
-    elif fee_evidence.type == "insufficient" and classification_status == CALCULABLE_RULE:
+    elif fee_evidence.type == "contradictory_fee_evidence" or (
+        fee_evidence.type == "insufficient" and classification_status == CALCULABLE_RULE
+    ):
         classification_status = NON_CALCULABLE
 
     # A rule must have a channel, unit, and behavior to be calculation-ready.
@@ -1180,6 +1224,16 @@ def _group_entries(entries: list[PricingEntry], account_country: str | None) -> 
             if last["section_key"] != item["section_key"]:
                 continue
             if last["product_id"] != item["product_id"]:
+                continue
+            # Do not let an included/free statement attach to an unrelated
+            # positive-fee base row (e.g. a 30% marketing fragment next to an
+            # included-pricing block).
+            base_entry = group[0]["entry"]
+            if (
+                _entry_component_hint(item["entry"]) in {"included", "free"}
+                and _entry_component_hint(base_entry) not in {"included", "free"}
+                and _has_base_fee(base_entry)
+            ):
                 continue
             if item["variant_id"] == last["variant_id"]:
                 group.append(item)

@@ -106,7 +106,11 @@ EXACTNESS_MARKERS: dict[str, str] = {
     "included": "included",
     "free": "free",
     "no additional fee": "included",
+    "no additional charge": "included",
+    "at no additional charge": "included",
     "no fee": "free",
+    "at no cost": "free",
+    "no cost": "free",
 }
 
 

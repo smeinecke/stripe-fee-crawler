@@ -9,10 +9,26 @@ from typing import Any
 from lxml import html
 
 from .models import FeeToken, Section
-from .pricing_tokens import tokenize_fee_text
+from .pricing_tokens import parse_fee_value, tokenize_fee_text
 from .rich_text import clean_fee_text, extract_links, extract_text
 
 HEADING_TAGS = {"h1", "h2", "h3", "h4", "h5", "h6"}
+
+# HTML classes that identify product-group headings on Stripe pricing pages.
+_FEATURE_GROUP_HEADING_CLASSES = {
+    "PricingProductFeatureGroup__headingButton",
+}
+
+
+def _element_classes(element: Any) -> set[str]:
+    """Return the CSS classes on an element as a set."""
+    cls = element.get("class") or ""
+    return set(cls.split())
+
+
+def _is_feature_group_heading(element: Any) -> bool:
+    """Return True for product-group heading buttons that act as section boundaries."""
+    return bool(_FEATURE_GROUP_HEADING_CLASSES & _element_classes(element))
 
 
 def _section_id_from_path(path: list[str]) -> str:
@@ -21,12 +37,16 @@ def _section_id_from_path(path: list[str]) -> str:
 
 
 def _is_heading(element: Any) -> bool:
-    return element.tag in HEADING_TAGS
+    return element.tag in HEADING_TAGS or _is_feature_group_heading(element)
 
 
 def _heading_level(element: Any) -> int:
     if element.tag in HEADING_TAGS:
         return int(element.tag[1])
+    if _is_feature_group_heading(element):
+        # Treat collapsible product-group headings as h1-level boundaries so
+        # they sit alongside the feature headings they contain.
+        return 1
     return 0
 
 
@@ -215,36 +235,61 @@ def extract_sections(html_text: str, base_url: str, page_kind: str = "pricing") 
     return _build_section_tree(tree, base_url)
 
 
+def _is_feeish_line(line: str) -> bool:
+    """Return True when a line contains a parseable fee or included/free statement."""
+    parsed = parse_fee_value(line)
+    return bool(parsed["percentage"] or parsed["fixed_amount"] or parsed["exactness"] in {"included", "free"})
+
+
 def split_section_body_into_entries(section: Section) -> list[tuple[str, list[FeeToken]]]:
     """Split a section body into candidate fee phrases.
 
     Returns a list of (phrase, tokens) pairs. Consecutive lines are merged when
     a fee line is immediately followed by a qualifier line (e.g. starting
-    with "for", "if", "per", "starting at", "up to"). This preserves the
-    context needed for classification.
+    with "for", "if", "per", "starting at", "up to", "of"). Short label lines
+    ending in "fee" or "price" (such as "Smart Disputes fee") are also merged
+    with the following fee amount so the resulting phrase keeps its context.
     """
     if not section.body:
         return []
     raw_lines = [clean_fee_text(line) for line in section.body.splitlines()]
     lines = [line for line in raw_lines if line]
 
-    merged: list[str] = []
     qualifier_pattern = re.compile(
-        r"^(for|if|per|starting at|up to|minimum|maximum|cap|capped|custom|contact sales)", re.IGNORECASE
+        r"^(of|for|if|per|starting at|up to|minimum|maximum|cap|capped|custom|contact sales)\b",
+        re.IGNORECASE,
     )
-    fee_pattern = re.compile(r"[0-9]\s*%|[0-9]\s*[€£$¥A-Z]|included|free")
+    label_pattern = re.compile(r"^[^\d]{1,40}\b(?:fee|price)\b$", re.IGNORECASE)
 
+    merged: list[str] = []
+    pending_label: str | None = None
     for line in lines:
-        if not merged:
-            merged.append(line)
+        is_feeish = _is_feeish_line(line)
+        is_label = bool(label_pattern.match(line)) and not is_feeish
+
+        if is_label:
+            pending_label = line
             continue
-        previous = merged[-1]
-        if qualifier_pattern.match(line) and fee_pattern.search(previous):
+
+        previous = merged[-1] if merged else None
+        is_qualifier = bool(qualifier_pattern.match(line))
+
+        if is_qualifier and previous and _is_feeish_line(previous):
             merged[-1] = f"{previous} {line}"
-        elif fee_pattern.search(line):
-            merged.append(line)
+        elif is_feeish:
+            phrase = line
+            if pending_label:
+                phrase = f"{pending_label} {phrase}"
+                pending_label = None
+            merged.append(phrase)
         else:
+            if pending_label:
+                merged.append(pending_label)
+                pending_label = None
             merged.append(line)
+
+    if pending_label:
+        merged.append(pending_label)
 
     results: list[tuple[str, list[FeeToken]]] = []
     for phrase in merged:

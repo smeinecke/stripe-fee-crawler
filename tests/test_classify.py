@@ -303,3 +303,83 @@ def test_calculable_when_explicit_fee_phrase_present() -> None:
     )
     rules, _ = classify_entries([entry])
     assert any(r.classification_status == "calculable_rule" for r in rules)
+
+
+def _make_entry(source_text: str, section_path: list[str] | None = None, source_order: int = 0) -> PricingEntry:
+    return PricingEntry(
+        entry_id=f"e{source_order}",
+        source_text=source_text,
+        source_url="https://stripe.com/ae/pricing",
+        section_path=section_path or ["Smart Disputes"],
+        source_order=source_order,
+    )
+
+
+def test_no_calculable_30_percent_dispute_from_included_fragment() -> None:
+    """The AE/AU 30% fragment must not become a calculable dispute fee."""
+    entries = [
+        _make_entry("30%", source_order=0),
+        _make_entry("Included with Payments", source_order=1),
+        _make_entry(
+            "Included at no additional charge for businesses on standard payments pricing",
+            source_order=2,
+        ),
+    ]
+    rules, _ = classify_entries(entries, "AE")
+    assert not any(
+        r.classification_status == "calculable_rule" and r.product_id == "disputes" and r.percentage == "30"
+        for r in rules
+    )
+    assert any(r.source_text == "30%" and r.classification_status != "calculable_rule" for r in rules)
+
+
+def test_included_standard_tier_classified() -> None:
+    """An included standard-pricing statement is classified as included."""
+    entries = [
+        _make_entry("Included", ["Authorization Boost"], source_order=0),
+        _make_entry(
+            "Included at no additional charge for businesses on standard payments pricing",
+            ["Authorization Boost"],
+            source_order=1,
+        ),
+    ]
+    rules, _ = classify_entries(entries, "AE")
+    assert rules
+    assert rules[0].exactness == "included"
+    assert rules[0].classification_status in {"included", "free"}
+
+
+def test_paid_custom_pricing_tier_calculable() -> None:
+    """A concrete fee scoped to custom pricing is calculable, not custom-quote."""
+    entry = _make_entry(
+        "0.2% per successful online card transaction for accounts with custom payments pricing",
+        ["Authorization Boost"],
+    )
+    rules, _ = classify_entries([entry], "AE")
+    calculable = [r for r in rules if r.classification_status == "calculable_rule"]
+    assert calculable, "expected custom-pricing paid tier to be calculable"
+    assert calculable[0].percentage == "0.2"
+    assert calculable[0].exactness == "exact"
+
+
+def test_no_calculable_from_adjacent_marketing_percentage() -> None:
+    """Marketing percentages such as '30% of customers' are not fees."""
+    entry = _make_entry("30% of customers choose Stripe for payments", ["Payments"])
+    rules, _ = classify_entries([entry], "AE")
+    assert not any(r.classification_status == "calculable_rule" for r in rules)
+
+
+def test_legitimate_percentage_dispute_fee_with_explicit_fee_wording() -> None:
+    """A real dispute fee with explicit wording is calculable."""
+    entry = _make_entry(
+        "Smart Disputes fee 30% of the disputed amount for each dispute you win.",
+        ["Smart Disputes"],
+    )
+    rules, _ = classify_entries([entry], "AE")
+    calculable = [r for r in rules if r.classification_status == "calculable_rule"]
+    assert calculable
+    rule = calculable[0]
+    assert rule.product_id == "disputes"
+    assert rule.percentage == "30"
+    assert rule.unit == "per_dispute"
+    assert any(c.dimension == "dispute_state" and c.value == "won" for c in rule.conditions)
