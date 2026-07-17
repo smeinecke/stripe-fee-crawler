@@ -154,6 +154,11 @@ def test_generated_schemas_have_id(generator, schema_id: str) -> None:
 
 def _valid_core_rule(**overrides: Any) -> CoreFeeRule:
 
+    defaults: dict[str, Any] = {
+        "payment_method": None,
+        "conditions": [],
+    }
+    defaults.update(overrides)
     return CoreFeeRule(
         rule_id="r1",
         product_id="payments",
@@ -162,8 +167,6 @@ def _valid_core_rule(**overrides: Any) -> CoreFeeRule:
         provider="stripe",
         account_country="DE",
         channel="online",
-        payment_method="card",
-        conditions=[FeeCondition(dimension="card_origin", value="domestic")],
         fee_components=[
             FeeComponent(type="percentage", value="1.5", basis_points="150"),
             FeeComponent(type="fixed_amount", amount="0.25", currency="EUR", minor_amount="25"),
@@ -174,7 +177,7 @@ def _valid_core_rule(**overrides: Any) -> CoreFeeRule:
         classification_status="calculable_rule",
         confidence=0.85,
         fee_evidence=FeeEvidence(type="explicit_fee_phrase", confidence=0.85),
-        **overrides,
+        **defaults,
     )
 
 
@@ -211,7 +214,7 @@ def test_semantic_validation_passes() -> None:
         url_prefix="https://stripe.com/en-de",
         status="supported",
     )
-    rule = _valid_core_rule()
+    rule = _valid_core_rule(payment_method="card", conditions=[FeeCondition(dimension="card_origin", value="domestic")])
     core_fees = CoreFees(
         markets=[
             CoreFeeEntry(
@@ -283,7 +286,7 @@ def test_semantic_validation_fails_bad_currency_exponent() -> None:
 
 
 def test_semantic_validation_fails_missing_market() -> None:
-    rule = _valid_core_rule()
+    rule = _valid_core_rule(payment_method="card")
     core_fees = CoreFees(
         markets=[
             CoreFeeEntry(
@@ -308,6 +311,7 @@ def test_semantic_validation_fails_on_contradictory_fee_evidence() -> None:
     """A calculable rule must not mix positive-fee and included/free evidence."""
     rule = _valid_core_rule().model_copy(
         update={
+            "payment_method": "card",
             "fee_evidence": FeeEvidence(
                 type="explicit_fee_phrase",
                 phrases=[
@@ -316,7 +320,7 @@ def test_semantic_validation_fails_on_contradictory_fee_evidence() -> None:
                     "Included at no additional charge for businesses on standard payments pricing",
                 ],
                 confidence=0.85,
-            )
+            ),
         }
     )
     core_fees = CoreFees(

@@ -57,6 +57,7 @@ async def test_crawl_market_unsupported() -> None:
     config = CrawlConfiguration(
         offline_fixtures={
             "https://stripe.com/pricing": "tests/fixtures/unsupported.html",
+            "https://stripe.com/pricing/local-payment-methods": "tests/fixtures/unsupported.html",
         },
         request_delay=0.0,
     )

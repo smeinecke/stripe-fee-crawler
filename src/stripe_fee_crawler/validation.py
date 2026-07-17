@@ -690,6 +690,109 @@ def _validate_rule_payer_condition(rule: CoreFeeRule, market_code: str, errors: 
         errors.append(f"{market_code}/{rule.rule_id}: customer-paid conversion fee missing payer=customer condition")
 
 
+# Dimensions that only make sense for card-based products.
+_CARD_ONLY_DIMENSIONS = {"card_region", "card_origin", "card_tier"}
+
+
+def _leading_method_in_label(label: str, method_by_display: dict[str, str]) -> str | None:
+    """Return the payment method id if the rule label starts with a method name.
+
+    Prefers the longest display-name match that begins earliest in the label, and
+    ignores methods that appear after leading fee/qualifier text so that
+    "0.2% per successful online card transaction" is not treated as a card rule.
+    """
+    if not label:
+        return None
+    words = label.split()[:6]
+    head = " ".join(words).lower()
+    candidates: list[tuple[int, int, int, str]] = []
+    for display_name, method_id in method_by_display.items():
+        pattern = re.compile(rf"\b{re.escape(display_name.lower())}\b")
+        for match in pattern.finditer(head):
+            word_index = len(head[: match.start()].split())
+            # Allow a method name at the very start or immediately after a single
+            # leading word such as a currency (e.g. "USD Bank Transfer").
+            if word_index > 1:
+                continue
+            candidates.append((word_index, match.start(), -len(display_name), method_id))
+    if not candidates:
+        return None
+    # Earliest word index, then earliest character start, then longest length.
+    candidates.sort()
+    return candidates[0][3]
+
+
+def _validate_rule_product_identity(
+    rule: CoreFeeRule,
+    market_code: str,
+    errors: list[str],
+    method_by_display: dict[str, str],
+) -> None:
+    """Reject mismatches between payment method, product, and label.
+
+    Examples of mismatches that must not be published:
+      * payment_method=ach_direct_debit but product_id=disputes
+      * a label beginning with "ACH Direct Debit" but product_id=refunds
+      * unit=per_dispute on a payment-method base rate
+    """
+    leading_method = _leading_method_in_label(rule.label or "", method_by_display)
+    if (
+        leading_method
+        and leading_method != "card"
+        and rule.product_id
+        not in {
+            "payments",
+            "terminal",
+            leading_method,
+        }
+    ):
+        errors.append(
+            f"{market_code}/{rule.rule_id}: label begins with payment method {leading_method} "
+            f"but product_id is {rule.product_id}"
+        )
+    elif leading_method == "card" and rule.product_id not in {"payments", "terminal"}:
+        errors.append(
+            f"{market_code}/{rule.rule_id}: label begins with card payment method but product_id is {rule.product_id}"
+        )
+
+    if rule.payment_method:
+        if rule.product_id in {"payments"} and rule.payment_method != "card":
+            errors.append(
+                f"{market_code}/{rule.rule_id}: product {rule.product_id} has payment_method "
+                f"{rule.payment_method} (expected card)"
+            )
+        if rule.product_id == "terminal" and rule.payment_method not in {"card", "terminal", "tap_to_pay"}:
+            errors.append(
+                f"{market_code}/{rule.rule_id}: terminal product has unexpected payment_method {rule.payment_method}"
+            )
+        if rule.product_id not in {"payments", "terminal"} and rule.payment_method != rule.product_id:
+            errors.append(
+                f"{market_code}/{rule.rule_id}: payment_method {rule.payment_method} does not match "
+                f"product_id {rule.product_id}"
+            )
+
+    if rule.unit == "per_dispute" and rule.product_id not in {"disputes", "smart_disputes"}:
+        errors.append(f"{market_code}/{rule.rule_id}: unit=per_dispute used for non-dispute product {rule.product_id}")
+
+
+def _validate_rule_non_card_conditions(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    """Non-card products must not carry card-only dimensions."""
+    if rule.product_id in {"payments", "terminal"}:
+        return
+    for cond in rule.conditions:
+        if cond.dimension in _CARD_ONLY_DIMENSIONS:
+            errors.append(
+                f"{market_code}/{rule.rule_id}: non-card product {rule.product_id} contains "
+                f"card-only condition {cond.dimension}={cond.value}"
+            )
+
+
+def _validate_rule_evidence_duplicates(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    """Evidence phrases must not contain duplicate text."""
+    if rule.fee_evidence and len(rule.fee_evidence.phrases) != len(set(rule.fee_evidence.phrases)):
+        errors.append(f"{market_code}/{rule.rule_id}: fee_evidence.phrases contains duplicate text")
+
+
 def _validate_core_fees_semantic(
     core_fees: CoreFees,
     manifest: MarketManifest,
@@ -697,6 +800,7 @@ def _validate_core_fees_semantic(
 ) -> list[str]:
     errors: list[str] = []
     market_codes = {m.stripe_market_code for m in manifest.markets}
+    method_by_display = {m.display_name: m.method_id for m in payment_methods.methods if m.display_name}
     for entry in core_fees.markets:
         if entry.stripe_market_code not in market_codes:
             errors.append(
@@ -716,6 +820,9 @@ def _validate_core_fees_semantic(
             _validate_rule_payer_condition(rule, entry.stripe_market_code, errors)
             _validate_rule_market_share_evidence(rule, entry.stripe_market_code, errors)
             _validate_rule_cross_fragment_evidence(rule, entry.stripe_market_code, errors)
+            _validate_rule_product_identity(rule, entry.stripe_market_code, errors, method_by_display)
+            _validate_rule_non_card_conditions(rule, entry.stripe_market_code, errors)
+            _validate_rule_evidence_duplicates(rule, entry.stripe_market_code, errors)
             known_methods = {m.method_id for m in payment_methods.methods}
             if rule.payment_method and rule.payment_method not in known_methods:
                 errors.append(

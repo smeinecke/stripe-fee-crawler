@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
 
@@ -384,7 +385,8 @@ def _fee_evidence_for_group(
     base_entry = group[0]["entry"]
     combined = _source_text_for_group(group)
     entry_ids = [item["entry"].entry_id for item in group]
-    phrases = [item["entry"].source_text for item in group]
+    raw_phrases = [item["entry"].source_text for item in group]
+    phrases = _ordered_unique(_dedup_repeated_phrases(p) for p in raw_phrases)
 
     # 1. Promotional / conditional pricing is never a concrete fee.
     if _is_promotional_language(combined):
@@ -398,7 +400,7 @@ def _fee_evidence_for_group(
     # 2. Marketing prose with numbers is not a fee. Use the base entry text
     # (not the combined group text) so a section heading with fee language does
     # not mask marketing copy in the body.
-    if _is_marketing_prose(base_entry.source_text):
+    if _is_marketing_prose(_dedup_repeated_phrases(base_entry.source_text)):
         return FeeEvidence(
             type="marketing_prose",
             source_entry_ids=entry_ids,
@@ -411,16 +413,17 @@ def _fee_evidence_for_group(
     # fragment supplies the number while a different fragment supplies the fee
     # phrase, the rule is a false positive.
     positive_component_sources = {
-        c.source_text
+        _dedup_repeated_phrases(c.source_text) if c.source_text else None
         for c in fee_components
         if c.type in {"percentage", "fixed_amount", "percentage_surcharge", "fixed_surcharge"}
     }
     if positive_component_sources:
         value_from_marketing = all(_is_market_share_text(src) for src in positive_component_sources if src)
         fee_phrase_sources = [
-            e.source_text
+            _dedup_repeated_phrases(e.source_text)
             for e in [item["entry"] for item in group]
-            if _is_explicit_fee_phrase(e.source_text) and not _is_market_share_text(e.source_text)
+            if _is_explicit_fee_phrase(_dedup_repeated_phrases(e.source_text))
+            and not _is_market_share_text(_dedup_repeated_phrases(e.source_text))
         ]
         if value_from_marketing and fee_phrase_sources:
             return FeeEvidence(
@@ -491,25 +494,26 @@ def _fee_evidence_for_group(
 
 
 def _infer_card_region(entry: PricingEntry, account_country: str | None = None) -> str | None:
+    """Find the earliest card-region marker in the source text.
+
+    Avoid matching "foreign exchange" / FX wording as a card-region signal.
+    """
     text = " ".join(entry.section_path + [entry.source_text]).lower()
-    # Find the earliest region marker in the text so that a heading like
-    # "1.7% + A$0.30 for domestic cards" is not overridden by a later
-    # "for international cards" note in the same pricing card.
     region_markers = [
-        ("non-eea", "international"),
-        ("non eea", "international"),
-        ("eea", "eea"),
-        ("european economic area", "eea"),
-        ("uk", "uk"),
-        ("united kingdom", "uk"),
-        ("british", "uk"),
-        ("international", "international"),
-        ("foreign", "international"),
-        ("domestic", "domestic"),
+        (r"\bnon-eea\b", "international"),
+        (r"\bnon eea\b", "international"),
+        (r"\beea\b", "eea"),
+        (r"\beuropean economic area\b", "eea"),
+        (r"\buk\b", "uk"),
+        (r"\bunited kingdom\b", "uk"),
+        (r"\bbritish\b", "uk"),
+        (r"\binternational\b", "international"),
+        (r"\bforeign(?! exchange)\b", "international"),
+        (r"\bdomestic\b", "domestic"),
     ]
     earliest: tuple[int, str] | None = None
-    for marker, region in region_markers:
-        for match in re.finditer(re.escape(marker), text):
+    for pattern, region in region_markers:
+        for match in re.finditer(pattern, text):
             if earliest is None or match.start() < earliest[0]:
                 earliest = (match.start(), region)
     if earliest:
@@ -584,14 +588,94 @@ def _card_origin_for_region(card_region: str | None, account_country: str | None
     return "international"
 
 
-def _infer_product_id(entry: PricingEntry) -> str:
-    """Determine the semantic product id for a pricing entry."""
-    path = " ".join(p.lower() for p in entry.section_path)
-    text = entry.source_text.lower()
-    combined = path + " " + text
+def _is_card_product(product_id: str | None) -> bool:
+    """Return True for products whose pricing is inherently card-based."""
+    return product_id in {"payments", "terminal"}
 
-    # Add-on products must be detected before the more generic categories they
-    # would otherwise fall into (e.g. "Smart Disputes" before "disputes").
+
+def _is_payment_method_product(product_id: str | None) -> bool:
+    """Return True when the product is a specific payment method or card family."""
+    if not product_id:
+        return False
+    return product_id in _PAYMENT_METHOD_TOKENS or product_id in {"payments", "terminal"}
+
+
+def _product_from_heading(fee_category: str | None) -> str | None:
+    """Return the product id implied by a section heading, if unambiguous."""
+    if not fee_category:
+        return None
+    lower = fee_category.lower()
+    # Headings that name a specific payment method are handled by method detection.
+    for method in _PAYMENT_METHOD_TOKENS:
+        if method in {"card", "terminal"}:
+            continue
+        if method.replace("_", " ") in lower:
+            return None
+
+    heading_products = [
+        ("authorization boost", "authorization_boost"),
+        ("authorisation boost", "authorization_boost"),
+        ("smart dispute", "smart_disputes"),
+        ("smart disputes", "smart_disputes"),
+        ("dispute", "disputes"),
+        ("chargeback", "disputes"),
+        ("refund", "refunds"),
+        ("3d secure", "three_d_secure"),
+        ("3-d secure", "three_d_secure"),
+        ("customer authentication", "three_d_secure"),
+        ("instant payout", "instant_payouts"),
+        ("instant pay", "instant_payouts"),
+        ("custom domain", "custom_domain"),
+        ("post-payment invoice", "post_payment_invoice"),
+        ("post payment invoice", "post_payment_invoice"),
+        ("adaptive pricing", "adaptive_pricing"),
+        ("foreign exchange", "adaptive_pricing"),
+        ("fx", "adaptive_pricing"),
+        ("invoic", "invoicing"),
+        ("subscription", "subscriptions"),
+        ("recurring billing", "subscriptions"),
+        ("stablecoin", "stablecoin_payments"),
+        ("managed payments", "managed_payments"),
+        ("radar", "radar"),
+        ("platform", "platform"),
+        ("marketplace", "platform"),
+        ("tax", "tax"),
+    ]
+    for keyword, product in heading_products:
+        if re.search(rf"\b{re.escape(keyword)}", lower):
+            return product
+    return None
+
+
+def _infer_product_id(entry: PricingEntry) -> str:
+    """Determine the semantic product id for a pricing entry.
+
+    Trust the extracted payment method first so that trailing qualifiers such as
+    "for disputed payments" or "for refunds" cannot promote a payment-method
+    base fee into the disputes/refunds product.
+    """
+    heading = entry.fee_category or (entry.section_path[-1] if entry.section_path else None)
+    heading_product = _product_from_heading(heading)
+    if heading_product:
+        return heading_product
+
+    method = _infer_payment_method(entry)
+    if method:
+        if method == "card":
+            if _infer_channel(entry) == "in_person" or _text_has(
+                " ".join(p.lower() for p in entry.section_path), "terminal", "tap to pay", "in-person", "in person"
+            ):
+                return "terminal"
+            return "payments"
+        if method in {"terminal", "tap_to_pay"}:
+            return "terminal"
+        return method
+
+    # No explicit payment method: infer from the section heading / fee category.
+    path = " ".join(p.lower() for p in entry.section_path)
+    category = (entry.fee_category or "").lower()
+    combined = path + " " + category
+
     if _text_has(combined, "smart dispute", "smart disputes"):
         return "smart_disputes"
     if _text_has(combined, "authorization boost", "authorisation boost"):
@@ -608,7 +692,7 @@ def _infer_product_id(entry: PricingEntry) -> str:
         return "custom_domain"
     if _text_has(combined, "post-payment invoice", "post payment invoice"):
         return "post_payment_invoice"
-    if _text_has(combined, "adaptive pricing"):
+    if _text_has(combined, "adaptive pricing") or _text_has(combined, "foreign exchange", "fx"):
         return "adaptive_pricing"
     if _text_has(combined, "invoic"):
         return "invoicing"
@@ -625,19 +709,10 @@ def _infer_product_id(entry: PricingEntry) -> str:
     if _text_has(combined, "terminal", "tap to pay", "in-person", "in person", "reader"):
         return "terminal"
 
-    method = _infer_payment_method(entry)
-    if method and method not in {"card", "terminal"}:
-        # A specific local payment method (pix, upi, ideal, etc.) should keep its
-        # identity even when the phrase also mentions currency conversion.
-        return method
-    if method == "card" or "card" in combined or "payment" in combined:
+    text = entry.source_text.lower()
+    combined = path + " " + text
+    if "card" in combined or "payment" in combined:
         return "payments"
-
-    # Currency-conversion and FX fees live inside the card-payments/adaptive-pricing products.
-    if "currency conversion" in combined:
-        return "payments"
-    if _text_has(combined, "foreign exchange", "fx", "fx quotes"):
-        return "adaptive_pricing"
     if _text_has(combined, "ach"):
         return "ach_direct_debit"
     if "sepa" in combined:
@@ -746,18 +821,37 @@ def _infer_conditions(
     path = " ".join(p.lower() for p in entry.section_path)
     combined = path + " " + text
 
+    # Card-region, origin and tier are only meaningful for card-based products.
+    # For non-card products, international/domestic wording describes the
+    # transaction region / cross-border nature of the payment, not card origin.
     card_region = _infer_card_region(entry, account_country)
-    if card_region:
-        conditions.append(FeeCondition(dimension="card_region", value=card_region))
-        card_origin = _card_origin_for_region(card_region, account_country)
-        if card_origin:
-            conditions.append(FeeCondition(dimension="card_origin", value=card_origin))
-    card_tier = _infer_card_tier(entry.source_text)
-    if card_tier:
-        conditions.append(FeeCondition(dimension="card_tier", value=card_tier))
+    if _is_card_product(product_id):
+        if card_region:
+            conditions.append(FeeCondition(dimension="card_region", value=card_region))
+            card_origin = _card_origin_for_region(card_region, account_country)
+            if card_origin:
+                conditions.append(FeeCondition(dimension="card_origin", value=card_origin))
+        card_tier = _infer_card_tier(entry.source_text)
+        if card_tier:
+            conditions.append(FeeCondition(dimension="card_tier", value=card_tier))
+        if card_region == "uk":
+            conditions.append(FeeCondition(dimension="customer_country", value="GB"))
+    else:
+        if card_region:
+            if card_region == "domestic":
+                conditions.append(FeeCondition(dimension="cross_border", value=False))
+                conditions.append(FeeCondition(dimension="transaction_region", value="domestic"))
+            else:
+                conditions.append(FeeCondition(dimension="cross_border", value=True))
+                conditions.append(
+                    FeeCondition(
+                        dimension="transaction_region",
+                        value=card_region,
+                    )
+                )
 
     payment_method = _infer_payment_method(entry)
-    if payment_method and product_id in {"payments", "terminal"}:
+    if payment_method and _is_card_product(product_id):
         conditions.append(FeeCondition(dimension="payment_method", value=payment_method))
 
     channel = _infer_channel(entry)
@@ -793,16 +887,20 @@ def _infer_conditions(
         if "conversion" in combined:
             conditions.append(FeeCondition(dimension="fee_type", value="conversion_fee"))
 
-    if "won disputes" in combined or ("dispute" in combined and re.search(r"\b(won|win)\b", text)):
-        conditions.append(FeeCondition(dimension="dispute_state", value="won"))
-    elif "lost disputes" in combined or ("dispute" in combined and re.search(r"\blost\b", text)):
-        conditions.append(FeeCondition(dimension="dispute_state", value="lost"))
-    elif "received" in combined and "dispute" in combined:
-        conditions.append(FeeCondition(dimension="dispute_state", value="received"))
-    elif "countered" in combined or ("respond" in combined and "dispute" in combined):
-        conditions.append(FeeCondition(dimension="dispute_state", value="countered"))
+    # Dispute/refund/failure state is only meaningful for the dispute/refund
+    # product families.  A trailing "for lost disputes" qualifier on a payment-
+    # method base fee must not turn that base fee into a dispute-only rule.
+    if product_id in {"disputes", "smart_disputes", "refunds"}:
+        if "won disputes" in combined or ("dispute" in combined and re.search(r"\b(won|win)\b", text)):
+            conditions.append(FeeCondition(dimension="dispute_state", value="won"))
+        elif "lost disputes" in combined or ("dispute" in combined and re.search(r"\blost\b", text)):
+            conditions.append(FeeCondition(dimension="dispute_state", value="lost"))
+        elif "received" in combined and "dispute" in combined:
+            conditions.append(FeeCondition(dimension="dispute_state", value="received"))
+        elif "countered" in combined or ("respond" in combined and "dispute" in combined):
+            conditions.append(FeeCondition(dimension="dispute_state", value="countered"))
 
-    if product_id == "smart_disputes" and not any(c.dimension == "transaction_type" for c in conditions):
+    if product_id in {"smart_disputes", "disputes"} and not any(c.dimension == "transaction_type" for c in conditions):
         conditions.append(FeeCondition(dimension="transaction_type", value="dispute"))
 
     if "recurring" in path or "subscription" in path:
@@ -820,12 +918,6 @@ def _infer_conditions(
         conditions.append(FeeCondition(dimension="transaction_type", value="charge"))
     elif "per payout" in text or product_id == "instant_payouts":
         conditions.append(FeeCondition(dimension="transaction_type", value="payout"))
-    elif product_id == "disputes":
-        conditions.append(FeeCondition(dimension="transaction_type", value="dispute"))
-
-    # Country-specific card origin can also appear as an explicit customer country.
-    if card_region == "uk":
-        conditions.append(FeeCondition(dimension="customer_country", value="GB"))
 
     return conditions
 
@@ -918,6 +1010,41 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
 
 def _is_tap_to_pay(entry: PricingEntry) -> bool:
     return "tap to pay" in entry.source_text.lower() or entry.payment_method == "tap_to_pay"
+
+
+def _dedup_repeated_phrases(text: str) -> str:
+    """Remove consecutive duplicate word n-grams while preserving order.
+
+    This collapses artefacts such as "per successful charge per successful charge"
+    or "for domestic cards for domestic cards" that arise when a qualifier is
+    repeated across merged fragments.
+    """
+    words = text.split()
+    result: list[str] = []
+    i = 0
+    max_n = min(8, len(words) // 2) if len(words) > 4 else 3
+    while i < len(words):
+        duplicated = False
+        for n in range(max_n, 1, -1):
+            if i + n <= len(words) and result[-n:] == words[i : i + n]:
+                i += n
+                duplicated = True
+                break
+        if not duplicated:
+            result.append(words[i])
+            i += 1
+    return " ".join(result)
+
+
+def _ordered_unique(items: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
 
 
 def _has_base_fee(entry: PricingEntry, parsed: dict[str, Any] | None = None) -> bool:
@@ -1091,16 +1218,27 @@ def _empty_group_rule(
 def _base_conditions(item: dict[str, Any], account_country: str | None) -> list[FeeCondition]:
     """Build FeeCondition objects from enriched dimensions."""
     conditions: list[FeeCondition] = []
+    product_id = item.get("product_id")
     if item.get("payment_method"):
         conditions.append(FeeCondition(dimension="payment_method", value=item["payment_method"]))
     if item.get("channel"):
         conditions.append(FeeCondition(dimension="channel", value=item["channel"]))
-    if item.get("card_region"):
-        conditions.append(FeeCondition(dimension="card_region", value=item["card_region"]))
-        if item.get("card_origin"):
-            conditions.append(FeeCondition(dimension="card_origin", value=item["card_origin"]))
-    if item.get("card_tier"):
-        conditions.append(FeeCondition(dimension="card_tier", value=item["card_tier"]))
+    # Card-region dimensions only apply to card-based products.
+    if _is_card_product(product_id):
+        if item.get("card_region"):
+            conditions.append(FeeCondition(dimension="card_region", value=item["card_region"]))
+            if item.get("card_origin"):
+                conditions.append(FeeCondition(dimension="card_origin", value=item["card_origin"]))
+        if item.get("card_tier"):
+            conditions.append(FeeCondition(dimension="card_tier", value=item["card_tier"]))
+    elif item.get("card_region"):
+        region = item["card_region"]
+        if region == "domestic":
+            conditions.append(FeeCondition(dimension="cross_border", value=False))
+            conditions.append(FeeCondition(dimension="transaction_region", value="domestic"))
+        else:
+            conditions.append(FeeCondition(dimension="cross_border", value=True))
+            conditions.append(FeeCondition(dimension="transaction_region", value=region))
     if account_country:
         conditions.append(FeeCondition(dimension="account_country", value=account_country))
     return conditions
@@ -1116,7 +1254,7 @@ def _classify_group(
     variant_id = base_item["variant_id"]
 
     entry_ids: list[str] = []
-    source_texts: list[str] = []
+    raw_source_texts: list[str] = []
     fee_components: list[FeeComponent] = []
     exactness: str | None = None
     all_conditions: list[FeeCondition] = []
@@ -1128,7 +1266,7 @@ def _classify_group(
     for item in group:
         entry = item["entry"]
         entry_ids.append(entry.entry_id)
-        source_texts.append(entry.source_text)
+        raw_source_texts.append(entry.source_text)
         hint = _entry_component_hint(entry)
         fee_components.extend(_build_components_for_entry(entry, hint))
         entry_exactness = _infer_exactness(parse_fee_value(entry.source_text), entry.source_text)
@@ -1147,13 +1285,20 @@ def _classify_group(
             seen_conditions[key] = cond
     conditions = list(seen_conditions.values())
 
+    # Deduplicate repeated qualifiers in the presentation text while keeping
+    # every contributing entry id for provenance.
+    source_texts = _ordered_unique(_dedup_repeated_phrases(t) for t in raw_source_texts)
+    label = _dedup_repeated_phrases(base_entry.source_text)
+
     channel = base_item["channel"] or _infer_channel(base_entry)
     unit = _infer_unit(base_entry, product_id)
-    payment_method = base_item["payment_method"] or _infer_payment_method(base_entry)
+    payment_method = base_item["payment_method"]
+    if not payment_method and _is_payment_method_product(product_id):
+        payment_method = _infer_payment_method(base_entry)
 
     # Determine behavior based on fee shape and wording.
     has_surcharge = any(c.type in {"percentage_surcharge", "fixed_surcharge"} for c in fee_components)
-    has_alternative = bool(re.search(r"\b(or|alternative|instead of)\b", base_entry.source_text.lower()))
+    has_alternative = bool(re.search(r"\b(or|alternative|instead of)\b", label.lower()))
     if has_surcharge:
         behavior = "additive"
     elif has_alternative:
@@ -1255,9 +1400,22 @@ def _classify_group(
     max_fee = next((c for c in fee_components if c.type == "maximum_fee"), None)
     min_fee = next((c for c in fee_components if c.type == "minimum_fee"), None)
 
-    card_region = _infer_card_region(base_entry, account_country)
-    card_tier = _infer_card_tier(base_entry.source_text)
-    card_origin = _card_origin_for_region(card_region, account_country)
+    if _is_card_product(product_id):
+        card_region = _infer_card_region(base_entry, account_country)
+        card_tier = _infer_card_tier(base_entry.source_text)
+        card_origin = _card_origin_for_region(card_region, account_country)
+    else:
+        card_region = None
+        card_tier = None
+        card_origin = None
+
+    # Deduplicate source fragments by text while preserving all entry ids.
+    fragment_text_to_id: dict[str, str] = {}
+    for item in group:
+        e = item["entry"]
+        deduped = _dedup_repeated_phrases(e.source_text)
+        if deduped not in fragment_text_to_id:
+            fragment_text_to_id[deduped] = e.entry_id
 
     rule = FeeRule(
         rule_id=rule_id,
@@ -1265,7 +1423,7 @@ def _classify_group(
         contributing_entry_ids=entry_ids,
         product_id=product_id,
         variant_id=variant_id,
-        label=base_entry.source_text,
+        label=label,
         name=product_id,
         provider="stripe",
         account_country=account_country,
@@ -1289,10 +1447,10 @@ def _classify_group(
         conditions=conditions,
         additional_fees=[],
         fee_components=fee_components,
-        source_text=base_entry.source_text,
+        source_text=label,
         source_texts=source_texts,
         source_url=base_entry.source_url,
-        source_fragments=[{"entry_id": e.entry_id, "text": e.source_text} for e in [i["entry"] for i in group]],
+        source_fragments=[{"entry_id": entry_id, "text": text} for text, entry_id in fragment_text_to_id.items()],
         classification_status=classification_status,
         confidence=confidence,
         classification_evidence=[f"product={product_id}", f"variant={variant_id}"]
@@ -1301,7 +1459,7 @@ def _classify_group(
     )
 
     # Add reference notes for external fee components such as PayPal fees.
-    if "paypal fees" in base_entry.source_text.lower():
+    if "paypal fees" in label.lower():
         rule = rule.model_copy(update={"additional_fees": ["PayPal fees (external; not included in Stripe rate)"]})
 
     if classification_status == CUSTOM_PRICING:
@@ -1322,6 +1480,10 @@ def _enrich_entries(entries: list[PricingEntry], account_country: str | None) ->
     for _idx, entry in sorted_entries:
         product_id = _infer_product_id(entry)
         payment_method = _infer_payment_method(entry)
+        # Add-on and non-payment products should not inherit a generic card
+        # payment_method from their descriptive text.
+        if not _is_payment_method_product(product_id):
+            payment_method = None
         channel = _infer_channel(entry)
         card_region = _infer_card_region(entry, account_country)
         card_tier = _infer_card_tier(entry.source_text)

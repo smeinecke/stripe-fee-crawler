@@ -657,3 +657,78 @@ def test_currency_conversion_surcharge_not_attached_to_marketing() -> None:
     surcharges = [r for r in rules if r.classification_status == "calculable_rule" and r.percentage == "2"]
     assert surcharges, "currency conversion surcharge should be retained"
     assert all(r.payment_method == "card" for r in surcharges), "surcharge should stay attached to card payments"
+
+
+def _condition_values(rule, dimension: str):
+    return [c.value for c in rule.conditions if c.dimension == dimension]
+
+
+def test_lpm_modifiers_preserve_product_identity() -> None:
+    """Trailing dispute/refund/currency qualifiers must not change the payment-method product."""
+    cases = [
+        (
+            "ach_direct_debit",
+            "US",
+            "ACH Direct Debit 0.8% per transaction for standard settlement timing per transaction for standard settlement timing per transaction for standard settlement timing for international transactions if currency conversion is required per instant bank account validation for disputed payments for failed payments",
+            {"settlement_timing": "standard"},
+        ),
+        (
+            "bacs_direct_debit",
+            "GB",
+            "Bacs Direct Debit 1% + €0.25 for international transactions if currency conversion is required for disputed payments for failed payments per successful refund",
+            {"fixed_amount": "0.25", "fixed_currency": "EUR"},
+        ),
+        (
+            "bank_transfer",
+            "US",
+            "USD Bank Transfer 0.5% per successful transaction per successful transaction per successful transaction for international transactions if currency conversion is required per wire payment",
+            {"success": True},
+        ),
+        (
+            "klarna",
+            "AU",
+            "Klarna Australia, New Zealand 4.99% + A$0.55 for international transactions if currency conversion is required for lost disputes",
+            {"fixed_amount": "0.55", "fixed_currency": "AUD"},
+        ),
+        (
+            "pix",
+            "BR",
+            "Pix 2% per successful charge per successful charge per successful charge for international transactions if currency conversion is required",
+            {"transaction_type": "charge", "success": True},
+        ),
+        (
+            "upi",
+            "IN",
+            "UPI 2% per successful charge per successful charge per successful charge for international transactions if currency conversion is required",
+            {"transaction_type": "charge", "success": True},
+        ),
+    ]
+    for method, country, text, expected_fields in cases:
+        entry = PricingEntry(
+            entry_id=f"e-{method}",
+            source_text=text,
+            source_url=f"https://stripe.com/{country.lower()}/pricing/local-payment-methods",
+            section_path=["Payment methods", text.split("%")[0] + "%"],
+            payment_method=method,
+        )
+        rules, _ = classify_entries([entry], country)
+        calculable = [r for r in rules if r.classification_status == "calculable_rule" and r.product_id == method]
+        assert calculable, f"{method}: expected calculable rule for product {method}"
+        rule = calculable[0]
+        assert rule.payment_method == method, f"{method}: payment_method mismatch"
+        assert rule.unit in {"per_transaction", "per_charge"}, f"{method}: unexpected unit {rule.unit}"
+        assert _condition_values(rule, "cross_border") == [True], f"{method}: missing cross_border"
+        assert _condition_values(rule, "transaction_region") == ["international"], f"{method}: missing transaction_region"
+        assert _condition_values(rule, "currency_conversion_required") == [True], f"{method}: missing currency_conversion_required"
+        for field, value in expected_fields.items():
+            if field in {"settlement_timing", "transaction_type", "success"}:
+                actual = _condition_values(rule, field)
+                assert actual == [value], f"{method}: expected {field}={value!r}, got {actual!r}"
+            else:
+                actual = getattr(rule, field)
+                assert actual == value, f"{method}: expected {field}={value!r}, got {actual!r}"
+        # Card-only dimensions must not leak into non-card products.
+        for cond in rule.conditions:
+            assert cond.dimension not in {"card_region", "card_origin", "card_tier"}, (
+                f"{method}: non-card rule contains card-only dimension {cond.dimension}"
+            )
