@@ -232,25 +232,29 @@ def _infer_product_id(entry: PricingEntry) -> str:
         return "stablecoin_payments"
     if _text_has(combined, "managed payments"):
         return "managed_payments"
+    if _text_has(combined, "radar"):
+        return "radar"
     if _text_has(combined, "platform", "marketplace"):
         return "platform"
     if _text_has(combined, "terminal", "tap to pay", "in-person", "in person", "reader"):
         return "terminal"
 
-    # Currency-conversion surcharges live inside the card-payments product.
-    if "currency conversion" in combined and "+" in text:
+    # Currency-conversion and FX fees live inside the card-payments/adaptive-pricing products.
+    if "currency conversion" in combined:
         return "payments"
+    if _text_has(combined, "foreign exchange", "fx", "fx quotes"):
+        return "adaptive_pricing"
 
     method = _infer_payment_method(entry)
     if method and method not in {"card", "terminal"}:
         return method
-    if "card" in combined:
+    if method == "card" or "card" in combined or "payment" in combined:
         return "payments"
     if _text_has(combined, "ach"):
         return "ach_direct_debit"
     if "sepa" in combined:
         return "sepa_direct_debit"
-    return "payments"
+    return "unspecified"
 
 
 def _variant_id_for(
@@ -400,6 +404,8 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
         return "per_transaction"
     if "per successful" in text and "charge" in text:
         return "per_charge"
+    if "per paid invoice" in text or "per invoice" in text:
+        return "per_invoice"
     # Default unit for entries with a recognizable payment method or product.
     method = _infer_payment_method(entry)
     if method:
@@ -410,6 +416,21 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
         "bacs_direct_debit",
     }:
         return "per_transaction"
+    # Fallback unit for common product families when the phrase omits one.
+    product_unit_defaults: dict[str, str] = {
+        "payments": "per_transaction",
+        "instant_payouts": "per_payout",
+        "adaptive_pricing": "per_transaction",
+        "post_payment_invoice": "per_invoice",
+        "invoicing": "per_invoice",
+        "tax": "per_transaction",
+        "managed_payments": "per_transaction",
+        "three_d_secure": "per_transaction",
+        "radar": "per_transaction",
+        "ach_direct_debit": "per_transaction",
+    }
+    if product_id in product_unit_defaults:
+        return product_unit_defaults[product_id]
     if product_id in {
         "ideal",
         "wero",
@@ -692,7 +713,20 @@ def _classify_group(
             channel = "in_person"
         elif (
             payment_method
-            or product_id in {"disputes", "instant_payouts", "three_d_secure"}
+            or product_id
+            in {
+                "disputes",
+                "instant_payouts",
+                "three_d_secure",
+                "payments",
+                "adaptive_pricing",
+                "post_payment_invoice",
+                "invoicing",
+                "tax",
+                "managed_payments",
+                "radar",
+                "ach_direct_debit",
+            }
             or _text_has(base_entry.source_text.lower(), "card", "payment")
         ):
             channel = "online"
