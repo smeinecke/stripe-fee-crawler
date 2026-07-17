@@ -26,6 +26,7 @@ from .extract import extract_page_source, extract_pricing_entries
 from .http import HttpClient
 from .models import (
     ChangeReport,
+    CoverageSummary,
     CrawlConfiguration,
     CrawlReport,
     Market,
@@ -294,6 +295,7 @@ class StripeCrawler:
                 validate_all_output(staging, strict=True)
                 changed = _staging_changed(staging, old_dir)
 
+            coverage_summary = _aggregate_coverage(outputs)
             report = CrawlReport(
                 exit_code=0,
                 changed=changed,
@@ -304,6 +306,8 @@ class StripeCrawler:
                 markets_unsupported=[u.account_country for u in unsupported if u.account_country],
                 warnings=self.warnings,
                 change_report_path=str(Path(output_dir) / "change-report.json"),
+                cache_stats=self.http_client.cache_stats,
+                coverage_summary=coverage_summary,
             )
             return report
         except Exception:
@@ -333,6 +337,15 @@ def _staging_changed(staging_dir: Path, output_dir: Path) -> bool:
             if not _files_equal(src, dst):
                 return True
     return False
+
+
+def _aggregate_coverage(outputs: list[MarketOutput]) -> CoverageSummary:
+    """Sum per-market coverage summaries into a crawl-level summary."""
+    totals: dict[str, int] = {}
+    for output in outputs:
+        for field, value in output.coverage_summary.model_dump().items():
+            totals[field] = totals.get(field, 0) + int(value)
+    return CoverageSummary(**totals)
 
 
 def _files_equal(a: Path, b: Path) -> bool:

@@ -32,7 +32,7 @@ from .http_cache import (
     should_persist_to_cache,
     write_cache_entry,
 )
-from .models import CrawlConfiguration
+from .models import CacheStats, CrawlConfiguration
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +106,12 @@ class HttpClient:
         self,
         config: CrawlConfiguration | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
+        cache_stats: CacheStats | None = None,
     ) -> None:
         self.config = config or CrawlConfiguration()
         self._semaphore = asyncio.Semaphore(self.config.max_workers)
         self._transport = transport
+        self.cache_stats = cache_stats or CacheStats()
 
     async def close(self) -> None:
         """No-op; each request owns its own client."""
@@ -306,6 +308,10 @@ class HttpClient:
     def _cache_key(self, url: str, method: str) -> str:
         return cache_key(url, method)
 
+    def _update_cache_stats(self, **kwargs: int) -> None:
+        """Increment the mutable cache statistics counters."""
+        self.cache_stats = self.cache_stats.model_copy(update=kwargs)
+
     async def _request(
         self,
         method: str,
@@ -355,6 +361,10 @@ class HttpClient:
                 force_revalidate = True
             elif not force_revalidate:
                 # Fresh cache hit with no revalidation directive: return directly.
+                self._update_cache_stats(
+                    cache_hits=self.cache_stats.cache_hits + 1,
+                    bytes_avoided=self.cache_stats.bytes_avoided + len(cached_entry["content"]),
+                )
                 return HttpResponse(
                     url=cached_entry["url"],
                     status_code=cached_entry["status_code"],
@@ -404,6 +414,12 @@ class HttpClient:
                                 etag=response.headers.get("etag") or cached_entry.get("etag"),
                                 last_modified=response.headers.get("last-modified") or cached_entry.get("last_modified"),
                             )
+                        avoided = len(cached_entry["content"]) if cached_entry else 0
+                        self._update_cache_stats(
+                            cache_revalidations=self.cache_stats.cache_revalidations + 1,
+                            cache_304_responses=self.cache_stats.cache_304_responses + 1,
+                            bytes_avoided=self.cache_stats.bytes_avoided + avoided,
+                        )
                         return HttpResponse(
                             url=final_url,
                             status_code=304,
@@ -424,6 +440,7 @@ class HttpClient:
                         last_modified=response.headers.get("last-modified"),
                     )
                     self._detect_blocking_page(http_response)
+                    written = False
                     if not self.config.no_cache and method == "GET" and should_persist_to_cache(http_response.headers):
                         if cache_lookup_key:
                             write_cache_entry(
@@ -436,8 +453,13 @@ class HttpClient:
                                 etag=http_response.etag,
                                 last_modified=http_response.last_modified,
                             )
+                            written = True
                     elif cache_lookup_key:
                         remove_cache_entry(self.config, cache_lookup_key)
+                    self._update_cache_stats(
+                        cache_misses=self.cache_stats.cache_misses + 1,
+                        cache_writes=self.cache_stats.cache_writes + (1 if written else 0),
+                    )
                     if self.config.request_delay > 0:
                         await asyncio.sleep(self.config.request_delay)
                     return http_response
