@@ -370,7 +370,7 @@ def test_no_calculable_from_adjacent_marketing_percentage() -> None:
 
 
 def test_legitimate_percentage_dispute_fee_with_explicit_fee_wording() -> None:
-    """A real dispute fee with explicit wording is calculable."""
+    """A real Smart Disputes fee with explicit wording is a calculable add-on."""
     entry = _make_entry(
         "Smart Disputes fee 30% of the disputed amount for each dispute you win.",
         ["Smart Disputes"],
@@ -379,7 +379,127 @@ def test_legitimate_percentage_dispute_fee_with_explicit_fee_wording() -> None:
     calculable = [r for r in rules if r.classification_status == "calculable_rule"]
     assert calculable
     rule = calculable[0]
-    assert rule.product_id == "disputes"
+    assert rule.product_id == "smart_disputes"
+    assert rule.variant_id == "won_dispute"
     assert rule.percentage == "30"
     assert rule.unit == "per_dispute"
     assert any(c.dimension == "dispute_state" and c.value == "won" for c in rule.conditions)
+    assert any(c.dimension == "feature_enabled" and c.value == "smart_disputes" for c in rule.conditions)
+
+
+def test_three_d_secure_pricing_plans() -> None:
+    """3D Secure has a standard included variant and a custom paid variant."""
+    entries = [
+        _make_entry(
+            "Included at no additional charge for businesses on standard payments pricing",
+            ["3D Secure authentication"],
+            source_order=0,
+        ),
+        _make_entry(
+            "$0.03 per 3D Secure attempt for accounts with custom pricing.",
+            ["3D Secure authentication"],
+            source_order=1,
+        ),
+    ]
+    rules, _ = classify_entries(entries, "AE")
+    custom = [r for r in rules if r.classification_status == "calculable_rule" and r.product_id == "three_d_secure"]
+    assert len(custom) == 1
+    assert custom[0].fixed_amount == "0.03"
+    assert custom[0].variant_id == "custom_pricing"
+    assert any(c.dimension == "pricing_plan" and c.value == "custom" for c in custom[0].conditions)
+
+    included = [r for r in rules if r.product_id == "three_d_secure" and r.exactness == "included"]
+    assert included
+    assert included[0].variant_id == "standard_pricing"
+    assert any(c.dimension == "pricing_plan" and c.value == "standard" for c in included[0].conditions)
+
+
+def test_authorization_boost_pricing_plans() -> None:
+    """Authorization Boost has a standard included variant and a custom paid variant."""
+    entries = [
+        _make_entry(
+            "Included at no additional charge for businesses on standard payments pricing",
+            ["Authorization Boost"],
+            source_order=0,
+        ),
+        _make_entry(
+            "0.2% per successful online card transaction for accounts with custom payments pricing",
+            ["Authorization Boost"],
+            source_order=1,
+        ),
+    ]
+    rules, _ = classify_entries(entries, "AE")
+    custom = [
+        r for r in rules if r.classification_status == "calculable_rule" and r.product_id == "authorization_boost"
+    ]
+    assert len(custom) == 1
+    assert custom[0].percentage == "0.2"
+    assert custom[0].variant_id == "custom_pricing"
+    assert any(c.dimension == "pricing_plan" and c.value == "custom" for c in custom[0].conditions)
+
+    included = [r for r in rules if r.product_id == "authorization_boost" and r.exactness == "included"]
+    assert included
+    assert included[0].variant_id == "standard_pricing"
+
+
+def test_radar_pricing_plans() -> None:
+    """Radar emits distinct standard-pricing and custom-pricing calculable variants."""
+    entries = [
+        _make_entry(
+            "AED0.20 per screened transaction for accounts with all payment methods on standard pricing",
+            ["Radar"],
+            source_order=0,
+        ),
+        _make_entry(
+            "AED0.20 per screened transaction for accounts with custom pricing for any payment method",
+            ["Radar"],
+            source_order=1,
+        ),
+    ]
+    rules, _ = classify_entries(entries, "AE")
+    radar = [r for r in rules if r.classification_status == "calculable_rule" and r.product_id == "radar"]
+    assert len(radar) == 2
+    variants = {r.variant_id for r in radar}
+    assert variants == {"standard_pricing", "custom_pricing"}
+    for rule in radar:
+        plan = next((c.value for c in rule.conditions if c.dimension == "pricing_plan"), None)
+        assert plan
+        assert rule.variant_id == f"{plan}_pricing"
+
+
+def test_adaptive_pricing_starting_at_customer_paid() -> None:
+    """Adaptive Pricing starting-at rates are from-exact, customer-paid conversion fees."""
+    entry = _make_entry(
+        "Customers will be presented a conversion fee starting at 2%",
+        ["Adaptive Pricing"],
+    )
+    rules, _ = classify_entries([entry], "AE")
+    calculable = [r for r in rules if r.classification_status == "calculable_rule"]
+    assert calculable
+    rule = calculable[0]
+    assert rule.product_id == "adaptive_pricing"
+    assert rule.exactness == "from"
+    assert rule.percentage == "2"
+    assert any(c.dimension == "payer" and c.value == "customer" for c in rule.conditions)
+    assert any(c.dimension == "fee_type" and c.value == "conversion_fee" for c in rule.conditions)
+
+
+def test_add_on_no_collision_with_base_payments() -> None:
+    """Add-on fees keep a distinct identity from base card-processing rules."""
+    entries = [
+        _make_entry(
+            "1.5% + €0.25 per transaction for standard EEA cards",
+            ["Payments", "Online"],
+            source_order=0,
+        ),
+        _make_entry(
+            "0.2% per successful online card transaction for accounts with custom payments pricing",
+            ["Authorization Boost"],
+            source_order=1,
+        ),
+    ]
+    rules, _ = classify_entries(entries, "DE")
+    base = [r for r in rules if r.product_id == "payments" and r.classification_status == "calculable_rule"]
+    addon = [r for r in rules if r.product_id == "authorization_boost" and r.classification_status == "calculable_rule"]
+    assert base and addon
+    assert base[0].rule_id != addon[0].rule_id

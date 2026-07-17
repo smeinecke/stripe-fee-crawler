@@ -520,6 +520,116 @@ def _condition_key(conditions: list[FeeCondition]) -> tuple[tuple[str, str, Any]
     return tuple(sorted((c.dimension, c.operator, str(c.value)) for c in conditions))
 
 
+# Add-on products that must never be emitted as base payment-processing rules.
+_ADDON_PRODUCTS: set[str] = {
+    "authorization_boost",
+    "radar",
+    "smart_disputes",
+    "three_d_secure",
+}
+
+_PAYMENTS_VARIANTS: set[str] = {
+    "online_domestic_cards",
+    "online_international_cards",
+    "online_premium_cards",
+    "in_person_domestic_cards",
+    "in_person_international_cards",
+    "in_person_premium_cards",
+    "domestic_cards",
+    "international_cards",
+    "tap_to_pay",
+}
+
+
+def _rule_source_combined(rule: CoreFeeRule) -> str:
+    """Return a lower-cased combination of the rule label and evidence phrases."""
+    label = (rule.label or "").lower()
+    phrases = [p.lower() for p in (rule.fee_evidence.phrases if rule.fee_evidence else [])]
+    return f"{label} {' '.join(phrases)}"
+
+
+def _validate_rule_pricing_plan(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    """Every rule with a pricing-plan phrase must carry the matching condition."""
+    if not _is_calculable_status(rule.classification_status):
+        return
+    combined = _rule_source_combined(rule)
+    has_custom = "custom payments pricing" in combined or "custom pricing" in combined
+    has_standard = "standard payments pricing" in combined or "standard pricing" in combined
+    cond_values = {c.dimension: c.value for c in rule.conditions}
+    if has_custom and cond_values.get("pricing_plan") != "custom":
+        errors.append(
+            f"{market_code}/{rule.rule_id}: source evidence says custom pricing but pricing_plan=custom condition missing"
+        )
+    if has_standard and cond_values.get("pricing_plan") != "standard":
+        errors.append(
+            f"{market_code}/{rule.rule_id}: source evidence says standard pricing but pricing_plan=standard condition missing"
+        )
+
+
+def _validate_rule_add_on_identity(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    """Add-on products must not be published as base payment-processing rules."""
+    if not _is_calculable_status(rule.classification_status):
+        return
+    combined = _rule_source_combined(rule)
+    if rule.product_id in _ADDON_PRODUCTS and rule.variant_id in _PAYMENTS_VARIANTS:
+        errors.append(
+            f"{market_code}/{rule.rule_id}: add-on product {rule.product_id} published as payments variant {rule.variant_id}"
+        )
+    add_on_in_source = None
+    if "authorization boost" in combined or "authorisation boost" in combined:
+        add_on_in_source = "authorization_boost"
+    elif "smart dispute" in combined or "smart disputes" in combined:
+        add_on_in_source = "smart_disputes"
+    elif "3d secure" in combined or "3-d secure" in combined:
+        add_on_in_source = "three_d_secure"
+    elif "radar" in combined:
+        add_on_in_source = "radar"
+    if add_on_in_source and rule.product_id != add_on_in_source:
+        errors.append(
+            f"{market_code}/{rule.rule_id}: {add_on_in_source} source evidence published as product {rule.product_id}"
+        )
+
+
+def _validate_rule_smart_disputes(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    """Smart Disputes rules must require the Smart Disputes feature."""
+    if not _is_calculable_status(rule.classification_status):
+        return
+    if rule.product_id != "smart_disputes":
+        return
+    cond_values = {c.dimension: c.value for c in rule.conditions}
+    if cond_values.get("feature_enabled") != "smart_disputes":
+        errors.append(
+            f"{market_code}/{rule.rule_id}: smart_disputes rule missing feature_enabled=smart_disputes condition"
+        )
+    if cond_values.get("dispute_state") != "won":
+        errors.append(f"{market_code}/{rule.rule_id}: smart_disputes rule missing dispute_state=won condition")
+
+
+def _validate_rule_exactness_semantics(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    """Starting-at / starting-from phrases must be published as exactness=from."""
+    if not _is_calculable_status(rule.classification_status):
+        return
+    combined = _rule_source_combined(rule)
+    if ("starting at" in combined or "starting from" in combined) and rule.exactness != "from":
+        errors.append(
+            f"{market_code}/{rule.rule_id}: source evidence uses 'starting at' but exactness is {rule.exactness!r}"
+        )
+
+
+def _validate_rule_payer_condition(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    """Customer-paid conversion fees must carry a payer=customer condition."""
+    if not _is_calculable_status(rule.classification_status):
+        return
+    combined = _rule_source_combined(rule)
+    if "conversion fee" not in combined:
+        return
+    if "customer" not in combined and "customers" not in combined:
+        return
+    cond_values = {c.dimension: c.value for c in rule.conditions}
+    if cond_values.get("payer") != "customer":
+        errors.append(f"{market_code}/{rule.rule_id}: customer-paid conversion fee missing payer=customer condition")
+
+
 def _validate_core_fees_semantic(
     core_fees: CoreFees,
     manifest: MarketManifest,
@@ -539,6 +649,11 @@ def _validate_core_fees_semantic(
             _validate_rule_calculator_ready(rule, entry.stripe_market_code, errors)
             _validate_rule_contradictory_evidence(rule, entry.stripe_market_code, errors)
             _validate_rule_percentage_consistency(rule, entry.stripe_market_code, errors)
+            _validate_rule_pricing_plan(rule, entry.stripe_market_code, errors)
+            _validate_rule_add_on_identity(rule, entry.stripe_market_code, errors)
+            _validate_rule_smart_disputes(rule, entry.stripe_market_code, errors)
+            _validate_rule_exactness_semantics(rule, entry.stripe_market_code, errors)
+            _validate_rule_payer_condition(rule, entry.stripe_market_code, errors)
             known_methods = {m.method_id for m in payment_methods.methods}
             if rule.payment_method and rule.payment_method not in known_methods:
                 errors.append(

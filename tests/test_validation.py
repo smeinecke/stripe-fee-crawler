@@ -348,3 +348,203 @@ def test_semantic_validation_fails_on_contradictory_fee_evidence() -> None:
     with pytest.raises(CrawlerValidationError) as excinfo:
         validate_semantic("/unused", core_fees=core_fees, manifest=manifest, payment_methods=payment_methods)
     assert "included/free evidence" in str(excinfo.value).lower()
+
+
+def _core_fees_with_rule(rule: CoreFeeRule) -> CoreFees:
+    return CoreFees(
+        markets=[
+            CoreFeeEntry(
+                account_country="AE",
+                stripe_market_code="ae",
+                locale="en-ae",
+                derivation_status="complete",
+                rules=[rule],
+            )
+        ]
+    )
+
+
+def _market_manifest_for_ae() -> MarketManifest:
+    return MarketManifest(
+        markets=[
+            Market(
+                stripe_market_code="ae",
+                account_country="AE",
+                country_name="United Arab Emirates",
+                locale="en-ae",
+                url_prefix="https://stripe.com/ae",
+                status="supported",
+            )
+        ]
+    )
+
+
+def _payment_methods() -> PaymentMethodCatalog:
+    return PaymentMethodCatalog(methods=[PaymentMethodEntry(method_id="card", family="card", display_name="Card")])
+
+
+def test_semantic_validation_fails_missing_custom_pricing_plan() -> None:
+    """A calculable custom-pricing fee must carry pricing_plan=custom."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "product_id": "authorization_boost",
+            "variant_id": "custom_pricing",
+            "label": "0.2% per transaction for accounts with custom payments pricing",
+            "fee_evidence": FeeEvidence(
+                type="explicit_fee_phrase",
+                phrases=["0.2% per transaction for accounts with custom payments pricing"],
+                confidence=0.85,
+            ),
+            "fee_components": [FeeComponent(type="percentage", value="0.2", basis_points="20")],
+        }
+    )
+    core_fees = _core_fees_with_rule(rule)
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic(
+            "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
+        )
+    assert "pricing_plan=custom" in str(excinfo.value).lower()
+
+
+def test_semantic_validation_fails_missing_standard_pricing_plan() -> None:
+    """A calculable standard-pricing fee must carry pricing_plan=standard."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "product_id": "radar",
+            "variant_id": "standard_pricing",
+            "label": "AED0.20 per transaction for accounts on standard pricing",
+            "fee_evidence": FeeEvidence(
+                type="explicit_fee_phrase",
+                phrases=["AED0.20 per transaction for accounts on standard pricing"],
+                confidence=0.85,
+            ),
+            "fee_components": [FeeComponent(type="fixed_amount", amount="0.20", currency="AED", minor_amount="20")],
+        }
+    )
+    core_fees = _core_fees_with_rule(rule)
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic(
+            "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
+        )
+    assert "pricing_plan=standard" in str(excinfo.value).lower()
+
+
+def test_semantic_validation_fails_add_on_published_as_payments() -> None:
+    """An add-on fee must not be published under the payments product."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "product_id": "payments",
+            "variant_id": "online_domestic_cards",
+            "label": "Smart Disputes fee 30% for each dispute you win",
+            "fee_evidence": FeeEvidence(
+                type="explicit_fee_phrase",
+                phrases=["Smart Disputes fee 30% for each dispute you win"],
+                confidence=0.85,
+            ),
+            "fee_components": [FeeComponent(type="percentage", value="30", basis_points="3000")],
+        }
+    )
+    core_fees = _core_fees_with_rule(rule)
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic(
+            "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
+        )
+    assert "smart_disputes source evidence published" in str(excinfo.value).lower()
+
+
+def test_semantic_validation_fails_smart_disputes_missing_feature() -> None:
+    """A Smart Disputes rule must require feature_enabled=smart_disputes."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "product_id": "smart_disputes",
+            "variant_id": "won_dispute",
+            "label": "Smart Disputes fee 30% for each dispute you win",
+            "fee_evidence": FeeEvidence(
+                type="explicit_fee_phrase",
+                phrases=["Smart Disputes fee 30% for each dispute you win"],
+                confidence=0.85,
+            ),
+            "fee_components": [FeeComponent(type="percentage", value="30", basis_points="3000")],
+            "conditions": [FeeCondition(dimension="dispute_state", value="won")],
+        }
+    )
+    core_fees = _core_fees_with_rule(rule)
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic(
+            "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
+        )
+    assert "feature_enabled=smart_disputes" in str(excinfo.value).lower()
+
+
+def test_semantic_validation_fails_starting_at_published_exact() -> None:
+    """A starting-at rate must not be published as exact."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "product_id": "adaptive_pricing",
+            "label": "Customers will be presented a conversion fee starting at 2%",
+            "fee_evidence": FeeEvidence(
+                type="explicit_fee_phrase",
+                phrases=["Customers will be presented a conversion fee starting at 2%"],
+                confidence=0.85,
+            ),
+            "fee_components": [FeeComponent(type="percentage", value="2", basis_points="200")],
+        }
+    )
+    core_fees = _core_fees_with_rule(rule)
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic(
+            "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
+        )
+    assert "starting at" in str(excinfo.value).lower()
+
+
+def test_semantic_validation_fails_customer_paid_missing_payer() -> None:
+    """A customer-paid conversion fee must carry payer=customer."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "product_id": "adaptive_pricing",
+            "exactness": "from",
+            "label": "Customers will be presented a conversion fee starting at 2%",
+            "fee_evidence": FeeEvidence(
+                type="explicit_fee_phrase",
+                phrases=["Customers will be presented a conversion fee starting at 2%"],
+                confidence=0.85,
+            ),
+            "fee_components": [FeeComponent(type="percentage", value="2", basis_points="200")],
+            "conditions": [FeeCondition(dimension="fee_type", value="conversion_fee")],
+        }
+    )
+    core_fees = _core_fees_with_rule(rule)
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic(
+            "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
+        )
+    assert "payer=customer" in str(excinfo.value).lower()
+
+
+def test_semantic_validation_passes_valid_adaptive_pricing_from() -> None:
+    """A valid starting-at, customer-paid conversion fee passes semantic checks."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "product_id": "adaptive_pricing",
+            "variant_id": "standard",
+            "exactness": "from",
+            "label": "Customers will be presented a conversion fee starting at 2%",
+            "fee_evidence": FeeEvidence(
+                type="explicit_fee_phrase",
+                phrases=["Customers will be presented a conversion fee starting at 2%"],
+                confidence=0.85,
+            ),
+            "fee_components": [FeeComponent(type="percentage", value="2", basis_points="200")],
+            "conditions": [
+                FeeCondition(dimension="account_country", value="AE"),
+                FeeCondition(dimension="payer", value="customer"),
+                FeeCondition(dimension="fee_type", value="conversion_fee"),
+            ],
+        }
+    )
+    core_fees = _core_fees_with_rule(rule)
+    result = validate_semantic(
+        "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
+    )
+    assert result["success"]

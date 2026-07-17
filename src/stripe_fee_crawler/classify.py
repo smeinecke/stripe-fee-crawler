@@ -109,6 +109,13 @@ _PAYMENT_METHOD_TOKENS: tuple[str, ...] = (
 
 # Evidence vocabulary for positive fee classification and for rejecting common
 # false-positive sources.
+_ADDON_PRODUCTS: tuple[str, ...] = (
+    "authorization_boost",
+    "radar",
+    "smart_disputes",
+    "three_d_secure",
+)
+
 _POSITIVE_FEE_TERMS: tuple[str, ...] = (
     "fee",
     "fees",
@@ -174,6 +181,8 @@ _PROMOTIONAL_TERMS: tuple[str, ...] = (
     "contact us",
     "custom quote",
     "starting prices may apply",
+    "waive",
+    "waived",
 )
 
 _HARDWARE_PRICE_TERMS: tuple[str, ...] = (
@@ -228,6 +237,10 @@ def _is_explicit_fee_phrase(text: str) -> bool:
 
 def _is_marketing_prose(text: str) -> bool:
     """Return True for statistics, volume claims, and other marketing copy."""
+    # A phrase that already contains explicit fee language is a fee description,
+    # not marketing prose (e.g. "Customers will be presented a conversion fee").
+    if _is_explicit_fee_phrase(text):
+        return False
     return _text_has(text, *_MARKETING_TERMS)
 
 
@@ -433,10 +446,12 @@ def _infer_card_region(entry: PricingEntry, account_country: str | None = None) 
 
 
 def _infer_card_tier(phrase: str) -> str | None:
+    """Infer card tier only when the surrounding words refer to cards/tiers."""
     lower = phrase.lower()
-    if "premium" in lower:
+    card_context = "card" in lower or "tier" in lower or "scheme" in lower
+    if "premium" in lower and card_context:
         return "premium"
-    if "standard" in lower:
+    if "standard" in lower and card_context:
         return "standard"
     return None
 
@@ -497,6 +512,12 @@ def _infer_product_id(entry: PricingEntry) -> str:
     text = entry.source_text.lower()
     combined = path + " " + text
 
+    # Add-on products must be detected before the more generic categories they
+    # would otherwise fall into (e.g. "Smart Disputes" before "disputes").
+    if _text_has(combined, "smart dispute", "smart disputes"):
+        return "smart_disputes"
+    if _text_has(combined, "authorization boost", "authorisation boost"):
+        return "authorization_boost"
     if _text_has(combined, "dispute", "chargeback"):
         return "disputes"
     if _text_has(combined, "refund"):
@@ -572,7 +593,34 @@ def _variant_id_for(
     return "standard"
 
 
+def _infer_pricing_plan(entry: PricingEntry) -> str | None:
+    """Return custom/standard if the entry is explicitly scoped to a plan."""
+    combined = " ".join(p.lower() for p in entry.section_path) + " " + entry.source_text.lower()
+    # Check the longer phrase first so "custom payments pricing" wins over "custom pricing".
+    if "custom payments pricing" in combined or "custom pricing" in combined:
+        return "custom"
+    if "standard payments pricing" in combined or "standard pricing" in combined:
+        return "standard"
+    return None
+
+
 def _infer_variant_id(entry: PricingEntry, product_id: str, account_country: str | None) -> str:
+    pricing_plan = _infer_pricing_plan(entry)
+
+    # Add-on products use stable variants keyed to their pricing plan, and
+    # Smart Disputes uses a won/lost variant keyed to the dispute state.
+    if product_id in {"three_d_secure", "authorization_boost", "radar"} and pricing_plan:
+        return f"{pricing_plan}_pricing"
+    if product_id == "smart_disputes":
+        lower = entry.source_text.lower()
+        if re.search(r"\b(won|win)\b", lower):
+            return "won_dispute"
+        if "lost" in lower:
+            return "lost_dispute"
+        return "standard"
+    if product_id == "adaptive_pricing" and pricing_plan:
+        return f"{pricing_plan}_pricing"
+
     channel = _infer_channel(entry) or "online"
     payment_method = _infer_payment_method(entry)
     card_region = _infer_card_region(entry, account_country)
@@ -643,14 +691,30 @@ def _infer_conditions(
     if "instant settlement" in text or "instant payout" in text:
         conditions.append(FeeCondition(dimension="settlement_timing", value="instant"))
 
-    if "won disputes" in combined or "dispute" in combined and re.search(r"\b(won|win)\b", text):
+    pricing_plan = _infer_pricing_plan(entry)
+    if pricing_plan:
+        conditions.append(FeeCondition(dimension="pricing_plan", value=pricing_plan))
+
+    if product_id in {"smart_disputes", "disputes"} and _text_has(combined, "smart dispute", "smart disputes"):
+        conditions.append(FeeCondition(dimension="feature_enabled", value="smart_disputes"))
+
+    if product_id == "adaptive_pricing" or _text_has(combined, "adaptive pricing"):
+        if "customer" in combined and ("pay" in text or "present" in text or "bear" in text):
+            conditions.append(FeeCondition(dimension="payer", value="customer"))
+        if "conversion" in combined:
+            conditions.append(FeeCondition(dimension="fee_type", value="conversion_fee"))
+
+    if "won disputes" in combined or ("dispute" in combined and re.search(r"\b(won|win)\b", text)):
         conditions.append(FeeCondition(dimension="dispute_state", value="won"))
-    elif "lost disputes" in combined or "dispute" in combined and re.search(r"\blost\b", text):
+    elif "lost disputes" in combined or ("dispute" in combined and re.search(r"\blost\b", text)):
         conditions.append(FeeCondition(dimension="dispute_state", value="lost"))
     elif "received" in combined and "dispute" in combined:
         conditions.append(FeeCondition(dimension="dispute_state", value="received"))
     elif "countered" in combined or ("respond" in combined and "dispute" in combined):
         conditions.append(FeeCondition(dimension="dispute_state", value="countered"))
+
+    if product_id == "smart_disputes" and not any(c.dimension == "transaction_type" for c in conditions):
+        conditions.append(FeeCondition(dimension="transaction_type", value="dispute"))
 
     if "recurring" in path or "subscription" in path:
         conditions.append(FeeCondition(dimension="recurring", value=True))
@@ -689,7 +753,11 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
         return "per_invoice"
     if "per payout" in text:
         return "per_payout"
-    if "per authorisation" in text or "per authorization" in text:
+    if (
+        "per authorisation" in text
+        or "per authorization" in text
+        or ("per" in text and re.search(r"\battempt\b", text))
+    ):
         return "per_attempt"
     if "per successful charge" in text or "per charge" in text:
         return "per_charge"
@@ -722,6 +790,7 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
         "managed_payments": "per_transaction",
         "three_d_secure": "per_transaction",
         "radar": "per_transaction",
+        "smart_disputes": "per_dispute",
         "ach_direct_debit": "per_transaction",
     }
     if product_id in product_unit_defaults:
@@ -995,7 +1064,7 @@ def _classify_group(
 
     # Determine behavior based on fee shape and wording.
     has_surcharge = any(c.type in {"percentage_surcharge", "fixed_surcharge"} for c in fee_components)
-    has_alternative = any(word in base_entry.source_text.lower() for word in ("or", "alternative", "instead of"))
+    has_alternative = bool(re.search(r"\b(or|alternative|instead of)\b", base_entry.source_text.lower()))
     if has_surcharge:
         behavior = "additive"
     elif has_alternative:
@@ -1027,6 +1096,7 @@ def _classify_group(
                 "tax",
                 "managed_payments",
                 "radar",
+                "smart_disputes",
                 "ach_direct_debit",
             }
             or _text_has(base_entry.source_text.lower(), "card", "payment")
@@ -1190,7 +1260,7 @@ def _enrich_entries(entries: list[PricingEntry], account_country: str | None) ->
                     card_tier = previous["card_tier"]
 
         card_origin = _card_origin_for_region(card_region, account_country)
-        variant_id = _variant_id_for(product_id, payment_method, channel, card_region, card_tier, card_origin)
+        variant_id = _infer_variant_id(entry, product_id, account_country)
 
         enriched.append(
             {

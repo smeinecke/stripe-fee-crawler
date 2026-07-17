@@ -259,37 +259,72 @@ def split_section_body_into_entries(section: Section) -> list[tuple[str, list[Fe
         r"^(of|for|if|per|starting at|up to|minimum|maximum|cap|capped|custom|contact sales)\b",
         re.IGNORECASE,
     )
+    # Lines that end with a range/start qualifier introduce the next fee value.
+    prefix_qualifier_ends = (
+        "starting at",
+        "starting from",
+        "up to",
+        "minimum",
+        "maximum",
+        "from",
+    )
     label_pattern = re.compile(r"^[^\d]{1,40}\b(?:fee|price)\b$", re.IGNORECASE)
 
     merged: list[str] = []
     pending_label: str | None = None
+    pending_qualifier: str | None = None
     for line in lines:
         is_feeish = _is_feeish_line(line)
         is_label = bool(label_pattern.match(line)) and not is_feeish
 
         if is_label:
+            if pending_qualifier:
+                merged.append(pending_qualifier)
+                pending_qualifier = None
             pending_label = line
             continue
 
         previous = merged[-1] if merged else None
         is_qualifier = bool(qualifier_pattern.match(line))
+        parsed = parse_fee_value(line)
+        lower = line.lower()
+        is_prefix_qualifier = (
+            not is_feeish
+            and not is_label
+            and not is_qualifier
+            and (parsed["exactness"] in {"from", "range"} or lower.endswith(prefix_qualifier_ends))
+        )
 
         if is_qualifier and previous and _is_feeish_line(previous):
             merged[-1] = f"{previous} {line}"
         elif is_feeish:
             phrase = line
+            if pending_qualifier:
+                phrase = f"{pending_qualifier} {phrase}"
+                pending_qualifier = None
             if pending_label:
                 phrase = f"{pending_label} {phrase}"
                 pending_label = None
             merged.append(phrase)
+        elif is_prefix_qualifier:
+            if pending_label:
+                merged.append(pending_label)
+                pending_label = None
+            pending_qualifier = line
         else:
             if pending_label:
                 merged.append(pending_label)
                 pending_label = None
+            if pending_qualifier:
+                # A non-fee, non-qualifier line (e.g. marketing prose) breaks
+                # the pending qualifier.
+                pending_qualifier = None
             merged.append(line)
 
     if pending_label:
         merged.append(pending_label)
+    if pending_qualifier:
+        merged.append(pending_qualifier)
 
     results: list[tuple[str, list[FeeToken]]] = []
     for phrase in merged:
