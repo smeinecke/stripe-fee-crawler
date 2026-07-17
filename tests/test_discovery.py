@@ -112,7 +112,7 @@ def test_pricing_url_for() -> None:
 
 def test_payment_methods_url_for() -> None:
     market = build_market_from_code("US")
-    assert _payment_methods_url_for(market) == "https://stripe.com/pricing/local-payment-methods"
+    assert _payment_methods_url_for(market) == "https://stripe.com/en-us/pricing/local-payment-methods"
     market_de = build_market_from_code("DE")
     assert _payment_methods_url_for(market_de) == "https://stripe.com/en-de/pricing/local-payment-methods"
 

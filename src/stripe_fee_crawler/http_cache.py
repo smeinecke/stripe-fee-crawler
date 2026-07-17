@@ -26,11 +26,12 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 
+from .market_detection import detect_market
 from .models import CacheStats, CrawlConfiguration
 
 logger = logging.getLogger(__name__)
 
-CACHE_VERSION = "1"
+CACHE_VERSION = "2"
 
 # Content-negotiation headers that can change which market/language is served.
 _NEGOTIATION_HEADERS = {"accept", "accept-language", "accept-encoding", "accept-charset"}
@@ -159,6 +160,8 @@ class _CacheEntry:
     cache_version: str
     market: str | None
     locale: str | None
+    detected_market: str | None
+    detected_locale: str | None
     cache_control: str | None
 
     def to_json(self) -> dict[str, Any]:
@@ -175,6 +178,8 @@ class _CacheEntry:
             "fetched_at": self.fetched_at,
             "market": self.market,
             "locale": self.locale,
+            "detected_market": self.detected_market,
+            "detected_locale": self.detected_locale,
             "cache_control": self.cache_control,
         }
 
@@ -207,6 +212,8 @@ class _CacheEntry:
                 cache_version=version,
                 market=data.get("market"),
                 locale=data.get("locale"),
+                detected_market=data.get("detected_market"),
+                detected_locale=data.get("detected_locale"),
                 cache_control=data.get("cache_control"),
             )
         except Exception:
@@ -283,6 +290,24 @@ class HttpCache:
         if key not in self._file_locks:
             self._file_locks[key] = _FileLock(self._lock_path(key))
         return self._file_locks[key]
+
+    @staticmethod
+    def _locale_country(locale: str | None) -> str | None:
+        """Return the country portion of a locale tag, e.g. 'en-us' -> 'us'."""
+        if not locale:
+            return None
+        parts = locale.lower().split("-")
+        return parts[-1] if len(parts) > 1 else None
+
+    def _is_market_match(self, entry: _CacheEntry, market: str | None, locale: str | None) -> bool:
+        """Return True when the cached response was served for the requested market."""
+        if not entry.detected_market or not market:
+            return True
+        if entry.detected_market.upper() != market.upper():
+            return False
+        requested_country = self._locale_country(locale)
+        cached_country = self._locale_country(entry.detected_locale)
+        return not (requested_country and cached_country and requested_country != cached_country)
 
     def _is_fresh(self, entry: _CacheEntry) -> bool:
         """Return True if the stored entry may be served without revalidation."""
@@ -406,6 +431,18 @@ class HttpCache:
             async with lock.acquire():
                 entry = self._read_entry(key)
 
+                if entry is not None and not self._is_market_match(entry, market, locale):
+                    logger.warning(
+                        "Cached response for %s served market %s/%s but requested %s/%s; invalidating",
+                        _normalize_url(url),
+                        entry.detected_market,
+                        entry.detected_locale,
+                        market,
+                        locale,
+                    )
+                    self._remove_entry(key)
+                    entry = None
+
                 if entry is not None and not self._refresh and self._is_fresh(entry):
                     self.stats = self.stats.model_copy(
                         update={
@@ -451,6 +488,7 @@ class HttpCache:
 
                 if _is_valid_cacheable_response(response):
                     final_url = str(response.url)
+                    detection = detect_market(response.text, final_url)
                     entry = _CacheEntry(
                         key=key,
                         url=url,
@@ -464,6 +502,8 @@ class HttpCache:
                         cache_version=CACHE_VERSION,
                         market=market,
                         locale=locale,
+                        detected_market=detection.get("detected_market"),
+                        detected_locale=detection.get("detected_locale"),
                         cache_control=response.headers.get("cache-control"),
                     )
                     self._write_entry(entry)

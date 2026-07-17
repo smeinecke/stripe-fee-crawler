@@ -23,6 +23,7 @@ from .exceptions import (
     UnsupportedMarketError,
 )
 from .http import HttpClient, HttpResponse
+from .market_detection import COUNTRY_NAME_TO_ISO, CURRENCY_BY_COUNTRY
 from .models import CrawlConfiguration, Language, Market
 
 logger = logging.getLogger(__name__)
@@ -144,106 +145,6 @@ BOOTSTRAP_MARKETS: list[Market] = [
 DIRECT_LOCALE_MARKETS: set[str] = {"us", "gb", "au", "nz", "ie", "in", "ae"}
 
 
-COUNTRY_NAME_TO_ISO: dict[str, str] = {
-    "australia": "AU",
-    "austria": "AT",
-    "belgium": "BE",
-    "brazil": "BR",
-    "bulgaria": "BG",
-    "canada": "CA",
-    "croatia": "HR",
-    "cyprus": "CY",
-    "czech republic": "CZ",
-    "denmark": "DK",
-    "estonia": "EE",
-    "finland": "FI",
-    "france": "FR",
-    "germany": "DE",
-    "gibraltar": "GI",
-    "greece": "GR",
-    "hong kong": "HK",
-    "hungary": "HU",
-    "india": "IN",
-    "indonesia": "ID",
-    "ireland": "IE",
-    "italy": "IT",
-    "japan": "JP",
-    "latvia": "LV",
-    "liechtenstein": "LI",
-    "lithuania": "LT",
-    "luxembourg": "LU",
-    "malaysia": "MY",
-    "malta": "MT",
-    "mexico": "MX",
-    "netherlands": "NL",
-    "new zealand": "NZ",
-    "norway": "NO",
-    "poland": "PL",
-    "portugal": "PT",
-    "romania": "RO",
-    "singapore": "SG",
-    "slovakia": "SK",
-    "slovenia": "SI",
-    "spain": "ES",
-    "sweden": "SE",
-    "switzerland": "CH",
-    "thailand": "TH",
-    "united arab emirates": "AE",
-    "united kingdom": "GB",
-    "united states": "US",
-}
-
-
-CURRENCY_BY_COUNTRY: dict[str, str] = {
-    "AU": "AUD",
-    "AT": "EUR",
-    "BE": "EUR",
-    "BR": "BRL",
-    "BG": "EUR",
-    "CA": "CAD",
-    "HR": "EUR",
-    "CY": "EUR",
-    "CZ": "CZK",
-    "DK": "DKK",
-    "EE": "EUR",
-    "FI": "EUR",
-    "FR": "EUR",
-    "DE": "EUR",
-    "GI": "GBP",
-    "GR": "EUR",
-    "HK": "HKD",
-    "HU": "HUF",
-    "IN": "INR",
-    "ID": "IDR",
-    "IE": "EUR",
-    "IT": "EUR",
-    "JP": "JPY",
-    "LV": "EUR",
-    "LI": "CHF",
-    "LT": "EUR",
-    "LU": "EUR",
-    "MY": "MYR",
-    "MT": "EUR",
-    "MX": "MXN",
-    "NL": "EUR",
-    "NZ": "NZD",
-    "NO": "NOK",
-    "PL": "PLN",
-    "PT": "EUR",
-    "RO": "RON",
-    "SG": "SGD",
-    "SK": "EUR",
-    "SI": "EUR",
-    "ES": "EUR",
-    "SE": "SEK",
-    "CH": "CHF",
-    "TH": "THB",
-    "AE": "AED",
-    "GB": "GBP",
-    "US": "USD",
-}
-
-
 def _country_name_to_iso(name: str) -> str | None:
     normalized = name.strip().lower()
     return COUNTRY_NAME_TO_ISO.get(normalized)
@@ -257,15 +158,17 @@ def _locale_for_country(country_code: str, language: str = "en") -> str:
 
 
 def _pricing_url_for(market: Market) -> str:
-    if market.stripe_market_code == "us":
-        return "https://stripe.com/pricing"
-    return f"{market.url_prefix}/pricing"
+    """Return a market-locale URL that is independent of crawler IP geolocation.
+
+    Requesting ``/en-us/pricing`` sets the ``country=US`` cookie and redirects to
+    the generic ``/pricing`` path, while ``/en-gb/pricing`` redirects to ``/gb/pricing``.
+    All supported markets can therefore be requested with ``/{locale}/pricing``.
+    """
+    return f"https://stripe.com/{market.locale}/pricing"
 
 
 def _payment_methods_url_for(market: Market) -> str:
-    if market.stripe_market_code == "us":
-        return "https://stripe.com/pricing/local-payment-methods"
-    return f"{market.url_prefix}/pricing/local-payment-methods"
+    return f"https://stripe.com/{market.locale}/pricing/local-payment-methods"
 
 
 def _is_html_response(response: HttpResponse) -> bool:
@@ -486,7 +389,7 @@ async def discover_fee_pages(
             continue
         tested.append(url)
         try:
-            response = await http_client.get(url)
+            response = await http_client.get(url, market=market.account_country, locale=market.locale)
         except (AccessChallengeError, ContentSecurityError) as exc:
             logger.debug("Access/security failure for %s: %s", code, exc)
             transient_failure = True
@@ -509,12 +412,22 @@ async def discover_fee_pages(
             transient_failure = True
             continue
 
+        if response.detected_market and response.detected_market.upper() != code.upper():
+            logger.warning(
+                "Requested %s but %s served market %s (effective %s); treating as transient",
+                code,
+                url,
+                response.detected_market,
+                response.url,
+            )
+            transient_failure = True
+            continue
+
         if url == pricing_url and _is_pricing_page(response, tree):
-            pricing_url = str(response.url)
             pricing_response = response
             pricing_tree = tree
         elif url == payment_methods_url and _is_pricing_page(response, tree):
-            payment_methods_url = str(response.url)
+            pass
         else:
             # The local payment methods URL may redirect back to the main page.
             if url == payment_methods_url and str(response.url).rstrip("/") == pricing_url.rstrip("/"):

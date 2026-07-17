@@ -10,6 +10,7 @@ from typing import Any
 from lxml import html
 
 from .components import extract_sections, split_section_body_into_entries
+from .market_detection import detect_market
 from .models import PricingEntry, Section, Source
 from .pricing_tokens import parse_fee_value
 from .rich_text import clean_fee_text, extract_text
@@ -81,9 +82,22 @@ def extract_page_source(response: Any) -> Source:
     page_title = _extract_page_title(tree)
     page_id = _extract_page_id(tree)
     canonical_url = _extract_canonical_url(tree, response.url)
+
+    requested_url = getattr(response, "requested_url", None) or response.url
+    effective_url = response.url
+    detected_market = getattr(response, "detected_market", None)
+    detected_locale = getattr(response, "detected_locale", None)
+    if not detected_market:
+        detection = detect_market(response.text, effective_url, page_title=page_title)
+        detected_market = detection.get("detected_market")
+        detected_locale = detection.get("detected_locale")
+
     return Source(
-        requested_url=response.url,
+        requested_url=requested_url,
+        effective_url=effective_url,
         canonical_url=canonical_url,
+        detected_market=detected_market,
+        detected_locale=detected_locale,
         page_id=page_id,
         page_title=page_title,
         source_updated_at=_extract_update_time(tree),

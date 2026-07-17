@@ -88,7 +88,11 @@ class Source(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     requested_url: str
+    effective_url: str | None = None
     canonical_url: str | None = None
+    detected_market: str | None = None
+    detected_locale: str | None = None
+    detected_currency: str | None = None
     page_id: str | None = None
     page_title: str | None = None
     page_updated_at: str | None = None

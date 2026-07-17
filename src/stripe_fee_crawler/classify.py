@@ -538,26 +538,51 @@ def _infer_card_tier(phrase: str) -> str | None:
     return None
 
 
+def _earliest_payment_method(text: str, max_word_index: int | None = None) -> str | None:
+    """Return the earliest payment-method token in ``text``.
+
+    When ``max_word_index`` is given, only consider matches whose first word
+    starts at or before that word position.  This lets LPM card headings such
+    as "Link 2.9% ..." win over later qualifiers like "for Klarna".
+    """
+    text_lower = text.lower()
+    words = text_lower.split()
+    head = " ".join(words[:6])
+    best: tuple[int, int, str] | None = None
+    for method in _PAYMENT_METHOD_TOKENS:
+        display = method.replace("_", " ")
+        for match in re.finditer(rf"\b{re.escape(display)}s?\b", head if max_word_index is not None else text_lower):
+            word_index = len(head[: match.start()].split()) if max_word_index is not None else 0
+            if max_word_index is not None and word_index > max_word_index:
+                continue
+            if best is None or (word_index, match.start()) < (best[0], best[1]):
+                best = (word_index, match.start(), method)
+    return best[2] if best else None
+
+
 def _infer_payment_method(entry: PricingEntry) -> str | None:
     text = " ".join(entry.section_path + [entry.source_text]).lower()
-    # Phrase-level tokens win over generic section headings.
+    # Phrase-level tokens win over generic section headings, but a method name
+    # must appear at the start of the phrase/heading.  This prevents hidden LPM
+    # card content ("for Instant Bank Payments", "for Klarna") from hijacking
+    # the method identity of a Link, Card payments, etc. base fee.
     if "tap to pay" in text:
         return "tap_to_pay"
-    # Prefer the explicit method token in the phrase when present.
-    phrase = entry.source_text.lower()
-    for method in _PAYMENT_METHOD_TOKENS:
-        if method.replace("_", " ") in phrase:
-            if method == "terminal" and "card" in phrase:
-                continue
-            return method
-    # Fall back to the broader context.
+    leading = _earliest_payment_method(entry.source_text, max_word_index=1)
+    if leading:
+        if leading == "terminal" and "card" in entry.source_text.lower():
+            return "card"
+        return leading
+    # Fall back to the earliest explicit method token anywhere in the text.
+    earliest = _earliest_payment_method(text)
+    if earliest:
+        if earliest == "terminal" and "card" in text:
+            return "card"
+        return earliest
     if entry.payment_method:
         if entry.payment_method == "terminal" and "card" in text:
             return "card"
         return entry.payment_method
-    for method in _PAYMENT_METHOD_TOKENS:
-        if method.replace("_", " ") in text:
-            return method
     return None
 
 

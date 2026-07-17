@@ -25,7 +25,7 @@ from .exceptions import (
     ParserError,
 )
 from .extract import extract_page_source, extract_pricing_entries
-from .http import HttpClient
+from .http import HttpClient, HttpResponse
 from .models import (
     ChangeReport,
     CoverageSummary,
@@ -202,15 +202,23 @@ class StripeCrawler:
             html_text = _load_fixture(fixture_path)
             if html_text is None:
                 raise ParserError(f"Offline fixture not found: {fixture_path}")
-            return html_text, Source(
+            response = HttpResponse(
+                url=url,
                 requested_url=url,
-                canonical_url=url,
-                page_title=f"Fixture for {market.account_country}",
-                content_sha256=None,
+                status_code=200,
+                content=html_text.encode("utf-8"),
+                text=html_text,
+                headers={"content-type": "text/html"},
             )
+        else:
+            response = await self.http_client.get(url, market=market.account_country, locale=market.locale)
 
-        response = await self.http_client.get(url, market=market.account_country, locale=market.locale)
         source = extract_page_source(response)
+        if source.detected_market and source.detected_market.upper() != market.account_country.upper():
+            raise FeePageError(
+                f"Requested {market.account_country} but page served {source.detected_market} "
+                f"(effective_url={source.effective_url}, requested_url={source.requested_url})"
+            )
         return response.text, source
 
     async def crawl_all(

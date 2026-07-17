@@ -24,6 +24,7 @@ from .exceptions import (
     TransientNetworkError,
 )
 from .http_cache import HttpCache
+from .market_detection import detect_market
 from .models import CacheStats, CrawlConfiguration
 
 logger = logging.getLogger(__name__)
@@ -72,14 +73,19 @@ class HttpResponse:
     content: bytes
     text: str
     headers: dict[str, str]
+    requested_url: str | None = None
     etag: str | None = None
     last_modified: str | None = None
     content_sha256: str | None = None
     from_cache: bool = False
+    detected_market: str | None = None
+    detected_locale: str | None = None
 
     def __post_init__(self) -> None:
         if self.content_sha256 is None and self.content:
             self.content_sha256 = hashlib.sha256(self.content).hexdigest()
+        if self.requested_url is None:
+            self.requested_url = self.url
 
 
 @dataclass
@@ -315,12 +321,17 @@ class HttpClient:
             fixture_path = self.config.offline_fixtures[url]
             with open(fixture_path, "rb") as fh:
                 content = fh.read()
+            text = content.decode("utf-8")
+            detection = detect_market(text, url)
             return HttpResponse(
                 url=url,
+                requested_url=url,
                 status_code=200,
                 content=content,
-                text=content.decode("utf-8"),
+                text=text,
                 headers={"content-type": "text/html"},
+                detected_market=detection.get("detected_market"),
+                detected_locale=detection.get("detected_locale"),
             )
 
         self._validate_url(url)
@@ -384,8 +395,11 @@ class HttpClient:
             locale=locale,
         )
 
+        effective_url = str(response.url)
+        detection = detect_market(response.text, effective_url)
         return HttpResponse(
-            url=str(response.url),
+            url=effective_url,
+            requested_url=url,
             status_code=response.status_code,
             content=response.content,
             text=response.text,
@@ -393,6 +407,8 @@ class HttpClient:
             etag=response.headers.get("etag"),
             last_modified=response.headers.get("last-modified"),
             from_cache=from_cache or response.status_code == 304,
+            detected_market=detection.get("detected_market"),
+            detected_locale=detection.get("detected_locale"),
         )
 
     async def get(

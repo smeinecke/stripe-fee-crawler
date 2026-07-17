@@ -56,8 +56,8 @@ async def test_crawl_all_publishes(tmp_path: Path) -> None:
 async def test_crawl_market_unsupported() -> None:
     config = CrawlConfiguration(
         offline_fixtures={
-            "https://stripe.com/pricing": "tests/fixtures/unsupported.html",
-            "https://stripe.com/pricing/local-payment-methods": "tests/fixtures/unsupported.html",
+            "https://stripe.com/en-us/pricing": "tests/fixtures/unsupported.html",
+            "https://stripe.com/en-us/pricing/local-payment-methods": "tests/fixtures/unsupported.html",
         },
         request_delay=0.0,
     )
@@ -121,3 +121,66 @@ async def test_publish_with_regression(tmp_path: Path) -> None:
     report = check_regression(tmp_path, tmp_path / "new")
     assert report.has_regression
     assert any(c.kind == "large_percentage_change" for c in report.changes)
+
+
+async def test_crawl_market_rejects_cross_market_response() -> None:
+    """A US request that is answered with a DE page must be rejected."""
+    config = CrawlConfiguration(
+        offline_fixtures={
+            "https://stripe.com/en-us/pricing": "tests/fixtures/de-pricing.html",
+            "https://stripe.com/en-us/pricing/local-payment-methods": "tests/fixtures/de-lpm.html",
+        },
+        request_delay=0.0,
+    )
+    market = build_market_from_code("US", status="supported")
+    async with StripeCrawler(config) as crawler:
+        output = await crawler.crawl_market(market)
+    assert output.transient_failure
+    assert output.derivation_status == "failed"
+    assert len(output.entries) == 0
+
+
+async def test_crawl_market_us_rates() -> None:
+    """US fixtures must produce US online card and ACH direct debit rates."""
+    config = CrawlConfiguration(
+        offline_fixtures={
+            "https://stripe.com/en-us/pricing": "tests/fixtures/us-pricing.html",
+            "https://stripe.com/en-us/pricing/local-payment-methods": "tests/fixtures/us-lpm.html",
+        },
+        request_delay=0.0,
+    )
+    market = build_market_from_code("US", status="supported")
+    async with StripeCrawler(config) as crawler:
+        output = await crawler.crawl_market(market)
+    assert output.market.account_country == "US"
+    assert not output.transient_failure
+
+    online_card = [
+        r
+        for r in output.derived_rules
+        if r.product_id == "payments" and r.channel == "online" and r.percentage == "2.9"
+    ]
+    assert online_card, "expected US online domestic card fee 2.9%"
+    assert online_card[0].fixed_currency == "USD"
+
+    ach = [r for r in output.derived_rules if r.product_id == "ach_direct_debit"]
+    assert ach, "expected ACH Direct Debit rule"
+    assert ach[0].percentage == "0.8"
+    assert any(c.type == "maximum_fee" and c.amount == "5.00" and c.currency == "USD" for c in ach[0].fee_components)
+
+
+async def test_crawl_market_de_rates_eur() -> None:
+    """DE fixtures must produce EUR-denominated domestic card fees."""
+    config = CrawlConfiguration(
+        offline_fixtures={
+            "https://stripe.com/en-de/pricing": "tests/fixtures/de-pricing.html",
+            "https://stripe.com/en-de/pricing/local-payment-methods": "tests/fixtures/de-lpm.html",
+        },
+        request_delay=0.0,
+    )
+    market = build_market_from_code("DE", status="supported")
+    async with StripeCrawler(config) as crawler:
+        output = await crawler.crawl_market(market)
+    domestic = [r for r in output.derived_rules if r.product_id == "payments" and r.fixed_currency]
+    assert domestic
+    assert all(r.fixed_currency == "EUR" for r in domestic), "DE card fees must use EUR"

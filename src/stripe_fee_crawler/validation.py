@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .exceptions import ValidationError as CrawlerValidationError
+from .market_detection import _detect_market_from_path
 from .models import (
     CoreFeeRule,
     CoreFees,
@@ -197,6 +198,128 @@ def _validate_publication(output_dir: Path) -> list[str]:
     return errors
 
 
+def _validate_market_source_integrity(output_dir: Path) -> list[str]:
+    """Strict cross-market and source-integrity checks.
+
+    Rejects published data where a market's pages were served for a different
+    country, where the primary card fee uses the wrong currency, or where the
+    same source entry id appears under unrelated markets.
+    """
+    errors: list[str] = []
+    json_dir = output_dir / "json"
+    meta_dir = output_dir / "meta"
+
+    # Load manifest and index for cross-reference.
+    manifest: MarketManifest | None = None
+    if (meta_dir / "markets.json").exists():
+        with open(meta_dir / "markets.json", encoding="utf-8") as fh:
+            manifest = MarketManifest.model_validate(json.load(fh))
+    manifest_countries = {m.account_country.upper() for m in manifest.markets} if manifest else set()
+
+    index: MarketIndex | None = None
+    if (json_dir / "index.json").exists():
+        with open(json_dir / "index.json", encoding="utf-8") as fh:
+            index = MarketIndex.model_validate(json.load(fh))
+    index_by_country = {e.account_country.upper(): e for e in index.markets} if index else {}
+
+    core_fees_path = json_dir / "core-fees.json"
+    core_fees_by_country: dict[str, list[CoreFeeRule]] = {}
+    if core_fees_path.exists():
+        with open(core_fees_path, encoding="utf-8") as fh:
+            core_fees = CoreFees.model_validate(json.load(fh))
+        for entry in core_fees.markets:
+            core_fees_by_country[entry.account_country.upper()] = entry.rules
+
+    for path in sorted(json_dir.glob("*.json")):
+        if path.name in {"index.json", "core-fees.json", "payment-methods.json"}:
+            continue
+        country_code = path.stem.upper()
+        if country_code not in manifest_countries:
+            errors.append(f"{path.name}: no matching market in meta/markets.json")
+            continue
+
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            market_output = MarketOutput.model_validate(data)
+        except Exception as exc:
+            errors.append(f"{path.name}: cannot validate market output: {exc}")
+            continue
+
+        market = market_output.market
+        expected_country = market.account_country.upper()
+        expected_currency = market.default_currency
+
+        # 1. Source metadata must match the market.
+        for source in market_output.sources:
+            if source.detected_market and source.detected_market.upper() != expected_country:
+                errors.append(
+                    f"{path.name}: source {source.requested_url!r} served market "
+                    f"{source.detected_market} but file is for {expected_country}"
+                )
+
+            for url in (source.effective_url, source.canonical_url, source.requested_url):
+                if not url:
+                    continue
+                detected = _detect_market_from_path(url)
+                if detected and detected.upper() != expected_country:
+                    errors.append(
+                        f"{path.name}: source URL {url!r} contains explicit market {detected} "
+                        f"but file is for {expected_country}"
+                    )
+                    break
+
+        # 2. Index source_urls must match the market's canonical/requested URLs.
+        actual_source_urls: set[str] = set()
+        for source in market_output.sources:
+            url = source.canonical_url or source.requested_url or source.effective_url
+            if url:
+                actual_source_urls.add(url)
+        if expected_country in index_by_country:
+            index_urls = set(index_by_country[expected_country].source_urls)
+            if index_urls != actual_source_urls and actual_source_urls:
+                missing = index_urls - actual_source_urls
+                extra = actual_source_urls - index_urls
+                details = []
+                if missing:
+                    details.append(f"missing from country file: {sorted(missing)}")
+                if extra:
+                    details.append(f"missing from index: {sorted(extra)}")
+                errors.append(f"{path.name}: index source_urls mismatch ({'; '.join(details)})")
+
+        # 3. Primary card fees must use the market's default currency.
+        if expected_currency:
+            primary_rules = [
+                r
+                for r in market_output.derived_rules
+                if _is_calculable_status(r.classification_status)
+                and (r.product_id == "payments" or r.payment_method == "card")
+                and r.fixed_currency is not None
+            ]
+            for rule in primary_rules:
+                if rule.fixed_currency and rule.fixed_currency.upper() != expected_currency.upper():
+                    errors.append(
+                        f"{path.name}: primary card fee {rule.rule_id} uses currency "
+                        f"{rule.fixed_currency}, expected {expected_currency} for {expected_country}"
+                    )
+
+        # 4. Core-fees rules for this market should also respect the currency.
+        for rule in core_fees_by_country.get(expected_country, []):
+            if rule.product_id == "payments" and expected_currency:
+                for comp in rule.fee_components:
+                    if (
+                        comp.type == "fixed_amount"
+                        and comp.currency
+                        and comp.currency.upper() != expected_currency.upper()
+                    ):
+                        errors.append(
+                            f"core-fees/{expected_country}: primary card fee {rule.rule_id} "
+                            f"uses currency {comp.currency}, expected {expected_currency}"
+                        )
+
+    return errors
+
+
 def validate_all_output(output_dir: str | Path, strict: bool = True, semantic: bool = True) -> dict[str, Any]:
     """Validate all generated JSON files in an output directory.
 
@@ -271,6 +394,7 @@ def validate_all_output(output_dir: str | Path, strict: bool = True, semantic: b
 
     if strict:
         errors.extend(_validate_publication(output_dir))
+        errors.extend(_validate_market_source_integrity(output_dir))
 
     if strict and errors:
         raise CrawlerValidationError("Output validation failed:\n" + "\n".join(errors))

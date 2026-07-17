@@ -276,7 +276,7 @@ async def test_no_cache_directive_triggers_revalidation(tmp_path: Path) -> None:
     entry_path = cache_dir / "entries" / key[:2] / f"{key}.json"
     entry_path.parent.mkdir(parents=True, exist_ok=True)
     entry = {
-        "v": "1",
+        "v": "2",
         "key": key,
         "url": url,
         "final_url": url,
@@ -288,6 +288,8 @@ async def test_no_cache_directive_triggers_revalidation(tmp_path: Path) -> None:
         "fetched_at": time.time(),
         "market": "US",
         "locale": "en-US",
+        "detected_market": "US",
+        "detected_locale": "en-US",
         "cache_control": "no-cache",
     }
     entry_path.write_text(json.dumps(entry, ensure_ascii=False, sort_keys=True), encoding="utf-8")
@@ -333,3 +335,50 @@ async def test_corrupt_cache_entry_is_replaced(tmp_path: Path) -> None:
     assert entry_path.exists()
     data = json.loads(entry_path.read_text(encoding="utf-8"))
     assert base64.b64decode(data["content"]).decode("utf-8") == "<html>fresh</html>"
+
+
+@pytest.mark.asyncio
+async def test_cache_invalidated_on_market_mismatch(tmp_path: Path) -> None:
+    """A cached DE response stored under a US key must be discarded and refetched."""
+    from stripe_fee_crawler.http_cache import _cache_key
+
+    cache_dir = tmp_path
+    url = "https://stripe.com/en-us/pricing"
+    headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US"}
+    key = _cache_key("GET", url, "US", "en-US", headers)
+    entry_path = cache_dir / "entries" / key[:2] / f"{key}.json"
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "v": "2",
+        "key": key,
+        "url": url,
+        "final_url": url,
+        "status_code": 200,
+        "headers": {"content-type": "text/html"},
+        "content": base64.b64encode(b"<html lang='de-DE'>German pricing</html>").decode("ascii"),
+        "etag": '"abc"',
+        "last_modified": None,
+        "fetched_at": time.time(),
+        "market": "US",
+        "locale": "en-US",
+        "detected_market": "DE",
+        "detected_locale": "de-DE",
+        "cache_control": None,
+    }
+    entry_path.write_text(json.dumps(entry, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url)})
+        return httpx.Response(200, content=b"<html lang='en-US'>US pricing</html>")
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(max_workers=1, request_delay=0.0, cache_dir=str(cache_dir))
+    client = HttpClient(config, transport=transport)
+
+    response = await client.get(url, market="US", locale="en-US")
+    assert response.text == "<html lang='en-US'>US pricing</html>"
+    assert response.detected_market == "US"
+    assert not response.from_cache
+    assert len(calls) == 1
