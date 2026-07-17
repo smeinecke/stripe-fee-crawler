@@ -718,8 +718,12 @@ def test_lpm_modifiers_preserve_product_identity() -> None:
         assert rule.payment_method == method, f"{method}: payment_method mismatch"
         assert rule.unit in {"per_transaction", "per_charge"}, f"{method}: unexpected unit {rule.unit}"
         assert _condition_values(rule, "cross_border") == [True], f"{method}: missing cross_border"
-        assert _condition_values(rule, "transaction_region") == ["international"], f"{method}: missing transaction_region"
-        assert _condition_values(rule, "currency_conversion_required") == [True], f"{method}: missing currency_conversion_required"
+        assert _condition_values(rule, "transaction_region") == ["international"], (
+            f"{method}: missing transaction_region"
+        )
+        assert _condition_values(rule, "currency_conversion_required") == [True], (
+            f"{method}: missing currency_conversion_required"
+        )
         for field, value in expected_fields.items():
             if field in {"settlement_timing", "transaction_type", "success"}:
                 actual = _condition_values(rule, field)
