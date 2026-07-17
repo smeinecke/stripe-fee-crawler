@@ -241,6 +241,37 @@ def _is_feeish_line(line: str) -> bool:
     return bool(parsed["percentage"] or parsed["fixed_amount"] or parsed["exactness"] in {"included", "free"})
 
 
+_MARKET_SHARE_PHRASES = (
+    "share",
+    "market share",
+    "most popular payment method",
+    "used in more than",
+    "used by over",
+    "adoption",
+    "customers use",
+    "active monthly users",
+    "active global customers",
+)
+
+
+def _is_market_share_statistic(line: str) -> bool:
+    """Return True for lines where a percentage describes market share, not a fee."""
+    parsed = parse_fee_value(line)
+    if not parsed["percentage"]:
+        return False
+    lower = line.lower()
+    for phrase in _MARKET_SHARE_PHRASES:
+        if phrase in lower:
+            return True
+    # Broad pattern: "more than X% share / used in ..."
+    return bool(re.search(r"\b(more than|over)\s+[0-9]+%?\s*(share|of)\b", lower))
+
+
+def _is_trusted_feeish_line(line: str) -> bool:
+    """Return True when a line is a genuine fee value, not a market-share statistic."""
+    return _is_feeish_line(line) and not _is_market_share_statistic(line)
+
+
 def split_section_body_into_entries(section: Section) -> list[tuple[str, list[FeeToken]]]:
     """Split a section body into candidate fee phrases.
 
@@ -249,6 +280,10 @@ def split_section_body_into_entries(section: Section) -> list[tuple[str, list[Fe
     with "for", "if", "per", "starting at", "up to", "of"). Short label lines
     ending in "fee" or "price" (such as "Smart Disputes fee") are also merged
     with the following fee amount so the resulting phrase keeps its context.
+
+    Qualifiers are anchored to the most recent trusted fee-value line in the
+    same pricing container; they do not attach to marketing prose such as
+    "... X% share of online payments".
     """
     if not section.body:
         return []
@@ -271,20 +306,21 @@ def split_section_body_into_entries(section: Section) -> list[tuple[str, list[Fe
     label_pattern = re.compile(r"^[^\d]{1,40}\b(?:fee|price)\b$", re.IGNORECASE)
 
     merged: list[str] = []
+    last_trusted_idx: int | None = None
     pending_label: str | None = None
-    pending_qualifier: str | None = None
+    pending_prefix: str | None = None
+    pending_suffix: str | None = None
+
+    def _flush_suffix() -> None:
+        nonlocal pending_suffix
+        if pending_suffix and last_trusted_idx is not None:
+            merged[last_trusted_idx] = f"{merged[last_trusted_idx]} {pending_suffix}"
+        pending_suffix = None
+
     for line in lines:
         is_feeish = _is_feeish_line(line)
+        is_trusted_feeish = is_feeish and not _is_market_share_statistic(line)
         is_label = bool(label_pattern.match(line)) and not is_feeish
-
-        if is_label:
-            if pending_qualifier:
-                merged.append(pending_qualifier)
-                pending_qualifier = None
-            pending_label = line
-            continue
-
-        previous = merged[-1] if merged else None
         is_qualifier = bool(qualifier_pattern.match(line))
         parsed = parse_fee_value(line)
         lower = line.lower()
@@ -295,36 +331,61 @@ def split_section_body_into_entries(section: Section) -> list[tuple[str, list[Fe
             and (parsed["exactness"] in {"from", "range"} or lower.endswith(prefix_qualifier_ends))
         )
 
-        if is_qualifier and previous and _is_feeish_line(previous):
-            merged[-1] = f"{previous} {line}"
-        elif is_feeish:
+        if is_label:
+            _flush_suffix()
+            if pending_label:
+                merged.append(pending_label)
+            pending_label = line
+            continue
+
+        if is_trusted_feeish:
+            _flush_suffix()
             phrase = line
-            if pending_qualifier:
-                phrase = f"{pending_qualifier} {phrase}"
-                pending_qualifier = None
+            if pending_prefix:
+                phrase = f"{pending_prefix} {phrase}"
+                pending_prefix = None
             if pending_label:
                 phrase = f"{pending_label} {phrase}"
                 pending_label = None
             merged.append(phrase)
-        elif is_prefix_qualifier:
-            if pending_label:
-                merged.append(pending_label)
-                pending_label = None
-            pending_qualifier = line
-        else:
-            if pending_label:
-                merged.append(pending_label)
-                pending_label = None
-            if pending_qualifier:
-                # A non-fee, non-qualifier line (e.g. marketing prose) breaks
-                # the pending qualifier.
-                pending_qualifier = None
-            merged.append(line)
+            last_trusted_idx = len(merged) - 1
+            continue
 
+        if is_feeish and not is_trusted_feeish:
+            # A market-share/marketing line that contains a percentage. Keep it
+            # as a separate entry so downstream classification can reject it,
+            # but do not let trailing qualifiers attach to it.
+            _flush_suffix()
+            if pending_label:
+                merged.append(pending_label)
+                pending_label = None
+            merged.append(line)
+            continue
+
+        if is_qualifier:
+            pending_suffix = f"{pending_suffix} {line}" if pending_suffix else line
+            continue
+
+        if is_prefix_qualifier:
+            _flush_suffix()
+            if pending_label:
+                merged.append(pending_label)
+                pending_label = None
+            pending_prefix = f"{pending_prefix} {line}" if pending_prefix else line
+            continue
+
+        # Any other prose line.
+        _flush_suffix()
+        if pending_label:
+            merged.append(pending_label)
+            pending_label = None
+        merged.append(line)
+
+    _flush_suffix()
     if pending_label:
         merged.append(pending_label)
-    if pending_qualifier:
-        merged.append(pending_qualifier)
+    if pending_prefix:
+        merged.append(pending_prefix)
 
     results: list[tuple[str, list[FeeToken]]] = []
     for phrase in merged:

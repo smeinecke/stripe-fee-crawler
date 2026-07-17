@@ -548,6 +548,66 @@ def _rule_source_combined(rule: CoreFeeRule) -> str:
     return f"{label} {' '.join(phrases)}"
 
 
+_MARKET_SHARE_PHRASES: tuple[str, ...] = (
+    "share of online payments",
+    "share of online transactions",
+    "share of e-commerce payments",
+    "market share",
+    "most popular payment method",
+    "used in more than",
+    "used by over",
+    "adoption",
+    "customers use",
+)
+
+
+def _contains_market_share_evidence(text: str) -> bool:
+    """Return True when the text contains market-share or adoption wording."""
+    lower = text.lower()
+    return any(phrase in lower for phrase in _MARKET_SHARE_PHRASES) or bool(
+        re.search(r"\b(more than|over)\s+[0-9]+%?\s*(share|of)\b", lower)
+    )
+
+
+def _is_positive_component_source(text: str | None) -> bool:
+    """Return True when a component's source text is a trusted fee-value node."""
+    if not text:
+        return False
+    lower = text.lower()
+    has_fee_language = bool(
+        re.search(r"\b(fee|charge|transaction|per\s+(charge|transaction|successful charge))\b", lower)
+        or "+ " in text
+        or "%" in text
+    )
+    return has_fee_language and not _contains_market_share_evidence(text)
+
+
+def _validate_rule_market_share_evidence(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    """Reject calculable rules whose evidence includes market-share statistics."""
+    if not _is_calculable_status(rule.classification_status):
+        return
+    combined = _rule_source_combined(rule)
+    if not _contains_market_share_evidence(combined):
+        return
+    # A calculable rule is only allowed to contain market-share text if the
+    # actual fee value comes from a separate, trusted pricing-value node.
+    component_sources = {
+        c.source_text
+        for c in rule.fee_components
+        if c.type in {"percentage", "fixed_amount", "percentage_surcharge", "fixed_surcharge"}
+    }
+    if not any(_is_positive_component_source(src) for src in component_sources):
+        errors.append(
+            f"{market_code}/{rule.rule_id}: calculable rule contains market-share evidence without a trusted fee-value source"
+        )
+
+
+def _validate_rule_cross_fragment_evidence(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
+    """Reject rules whose numeric fee value and fee wording come from different source fragments."""
+    if rule.fee_evidence and rule.fee_evidence.type == "cross_fragment_fee_evidence":
+        errors.append(f"{market_code}/{rule.rule_id}: fee value and fee wording come from different source fragments")
+
+
 def _validate_rule_pricing_plan(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
     """Every rule with a pricing-plan phrase must carry the matching condition."""
     if not _is_calculable_status(rule.classification_status):
@@ -654,6 +714,8 @@ def _validate_core_fees_semantic(
             _validate_rule_smart_disputes(rule, entry.stripe_market_code, errors)
             _validate_rule_exactness_semantics(rule, entry.stripe_market_code, errors)
             _validate_rule_payer_condition(rule, entry.stripe_market_code, errors)
+            _validate_rule_market_share_evidence(rule, entry.stripe_market_code, errors)
+            _validate_rule_cross_fragment_evidence(rule, entry.stripe_market_code, errors)
             known_methods = {m.method_id for m in payment_methods.methods}
             if rule.payment_method and rule.payment_method not in known_methods:
                 errors.append(

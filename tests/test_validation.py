@@ -548,3 +548,45 @@ def test_semantic_validation_passes_valid_adaptive_pricing_from() -> None:
         "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
     )
     assert result["success"]
+
+
+def test_semantic_validation_fails_market_share_evidence() -> None:
+    """A calculable rule whose source text is a market-share statistic must be rejected."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "label": "Pix 40% share of online payments",
+            "fee_evidence": FeeEvidence(
+                type="explicit_fee_phrase",
+                phrases=["Pix 40% share of online payments"],
+                confidence=0.85,
+            ),
+            "fee_components": [FeeComponent(type="percentage", value="40", basis_points="4000")],
+        }
+    )
+    core_fees = _core_fees_with_rule(rule)
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic(
+            "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
+        )
+    assert "market-share" in str(excinfo.value).lower()
+
+
+def test_semantic_validation_fails_cross_fragment_evidence() -> None:
+    """A rule whose fee evidence type is cross_fragment_fee_evidence must be rejected."""
+    rule = _valid_core_rule().model_copy(
+        update={
+            "label": "per successful charge for international transactions",
+            "fee_evidence": FeeEvidence(
+                type="cross_fragment_fee_evidence",
+                phrases=["40% share of online payments", "per successful charge for international transactions"],
+                confidence=0.0,
+            ),
+            "fee_components": [FeeComponent(type="percentage", value="40", basis_points="4000")],
+        }
+    )
+    core_fees = _core_fees_with_rule(rule)
+    with pytest.raises(CrawlerValidationError) as excinfo:
+        validate_semantic(
+            "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
+        )
+    assert "different source fragments" in str(excinfo.value).lower()

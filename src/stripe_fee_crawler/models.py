@@ -290,6 +290,7 @@ class FeeEvidence(BaseModel):
             "included",
             "free",
             "contradictory_fee_evidence",
+            "cross_fragment_fee_evidence",
         }
         if value not in allowed:
             raise ValueError(f"fee_evidence type must be one of {allowed}")

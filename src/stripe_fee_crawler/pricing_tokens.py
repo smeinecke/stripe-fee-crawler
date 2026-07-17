@@ -317,7 +317,7 @@ def _extract_percentage(text: str) -> list[dict[str, Any]]:
 def _extract_exactness(text: str) -> str | None:
     lower = text.lower()
     for marker, exactness in EXACTNESS_MARKERS.items():
-        if marker in lower:
+        if re.search(r"\b" + re.escape(marker) + r"\b", lower):
             return exactness
     return None
 

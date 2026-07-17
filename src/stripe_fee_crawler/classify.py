@@ -146,6 +146,8 @@ _POSITIVE_FEE_TERMS: tuple[str, ...] = (
     "processing fee",
     "transaction fee",
     "payment fee",
+    "currency conversion",
+    "foreign exchange",
 )
 
 _MARKETING_TERMS: tuple[str, ...] = (
@@ -171,6 +173,18 @@ _MARKETING_TERMS: tuple[str, ...] = (
     "years",
     "annual",
     "annually",
+    "share of",
+    "market share",
+    "most popular payment method",
+    "popular payment method",
+    "used in more than",
+    "used by over",
+    "active monthly users",
+    "active global customers",
+    "customers use",
+    "adoption",
+    "increase conversion",
+    "increase acceptance",
 )
 
 _PROMOTIONAL_TERMS: tuple[str, ...] = (
@@ -183,6 +197,23 @@ _PROMOTIONAL_TERMS: tuple[str, ...] = (
     "starting prices may apply",
     "waive",
     "waived",
+)
+
+# Phrases that indicate a percentage is a market/adoption statistic, not a fee.
+_MARKET_SHARE_STATISTICS: tuple[str, ...] = (
+    "share of online payments",
+    "share of online transactions",
+    "share of e-commerce payments",
+    "market share",
+    "most popular payment method",
+    "used in more than",
+    "used by over",
+    "active monthly users",
+    "active global customers",
+    "customers use",
+    "adoption",
+    "increase conversion",
+    "increase acceptance",
 )
 
 _HARDWARE_PRICE_TERMS: tuple[str, ...] = (
@@ -242,6 +273,16 @@ def _is_marketing_prose(text: str) -> bool:
     if _is_explicit_fee_phrase(text):
         return False
     return _text_has(text, *_MARKETING_TERMS)
+
+
+def _is_market_share_text(text: str) -> bool:
+    """Return True when the text is a market-share/adoption statistic."""
+    lower = text.lower()
+    if not _text_has(lower, *_MARKET_SHARE_STATISTICS):
+        return False
+    # A statistic is only a false-positive fee if it actually contains a number.
+    parsed = parse_fee_value(text)
+    return bool(parsed["percentage"] or parsed["fixed_amount"])
 
 
 def _is_promotional_language(text: str) -> bool:
@@ -354,14 +395,40 @@ def _fee_evidence_for_group(
             confidence=0.1,
         )
 
-    # 2. Marketing prose with numbers is not a fee.
-    if _is_marketing_prose(combined):
+    # 2. Marketing prose with numbers is not a fee. Use the base entry text
+    # (not the combined group text) so a section heading with fee language does
+    # not mask marketing copy in the body.
+    if _is_marketing_prose(base_entry.source_text):
         return FeeEvidence(
             type="marketing_prose",
             source_entry_ids=entry_ids,
             phrases=phrases,
             confidence=0.0,
         )
+
+    # 2b. Cross-fragment alignment: the numeric fee value and the fee wording
+    # must come from the same logical pricing record. If a market-share/statistic
+    # fragment supplies the number while a different fragment supplies the fee
+    # phrase, the rule is a false positive.
+    positive_component_sources = {
+        c.source_text
+        for c in fee_components
+        if c.type in {"percentage", "fixed_amount", "percentage_surcharge", "fixed_surcharge"}
+    }
+    if positive_component_sources:
+        value_from_marketing = all(_is_market_share_text(src) for src in positive_component_sources if src)
+        fee_phrase_sources = [
+            e.source_text
+            for e in [item["entry"] for item in group]
+            if _is_explicit_fee_phrase(e.source_text) and not _is_market_share_text(e.source_text)
+        ]
+        if value_from_marketing and fee_phrase_sources:
+            return FeeEvidence(
+                type="cross_fragment_fee_evidence",
+                source_entry_ids=entry_ids,
+                phrases=phrases,
+                confidence=0.0,
+            )
 
     # 3. Terminal hardware purchase prices.
     if _is_terminal_hardware_price(base_entry, product_id, fee_components, unit):
@@ -425,17 +492,28 @@ def _fee_evidence_for_group(
 
 def _infer_card_region(entry: PricingEntry, account_country: str | None = None) -> str | None:
     text = " ".join(entry.section_path + [entry.source_text]).lower()
-    # Exclusive/non-EEA markers must be checked before "eea".
-    if "non-eea" in text or "non eea" in text:
-        return "international"
-    if "eea" in text or "european economic area" in text:
-        return "eea"
-    if "uk" in text or "united kingdom" in text or "british" in text:
-        return "uk"
-    if "international" in text or "foreign" in text:
-        return "international"
-    if "domestic" in text:
-        return "domestic"
+    # Find the earliest region marker in the text so that a heading like
+    # "1.7% + A$0.30 for domestic cards" is not overridden by a later
+    # "for international cards" note in the same pricing card.
+    region_markers = [
+        ("non-eea", "international"),
+        ("non eea", "international"),
+        ("eea", "eea"),
+        ("european economic area", "eea"),
+        ("uk", "uk"),
+        ("united kingdom", "uk"),
+        ("british", "uk"),
+        ("international", "international"),
+        ("foreign", "international"),
+        ("domestic", "domestic"),
+    ]
+    earliest: tuple[int, str] | None = None
+    for marker, region in region_markers:
+        for match in re.finditer(re.escape(marker), text):
+            if earliest is None or match.start() < earliest[0]:
+                earliest = (match.start(), region)
+    if earliest:
+        return earliest[1]
     # Generic card-payment entries with no other region marker are domestic for
     # the merchant's account country.  Tap to Pay is not a card-region variant.
     if "tap to pay" in text or entry.payment_method == "tap_to_pay":
@@ -547,17 +625,19 @@ def _infer_product_id(entry: PricingEntry) -> str:
     if _text_has(combined, "terminal", "tap to pay", "in-person", "in person", "reader"):
         return "terminal"
 
+    method = _infer_payment_method(entry)
+    if method and method not in {"card", "terminal"}:
+        # A specific local payment method (pix, upi, ideal, etc.) should keep its
+        # identity even when the phrase also mentions currency conversion.
+        return method
+    if method == "card" or "card" in combined or "payment" in combined:
+        return "payments"
+
     # Currency-conversion and FX fees live inside the card-payments/adaptive-pricing products.
     if "currency conversion" in combined:
         return "payments"
     if _text_has(combined, "foreign exchange", "fx", "fx quotes"):
         return "adaptive_pricing"
-
-    method = _infer_payment_method(entry)
-    if method and method not in {"card", "terminal"}:
-        return method
-    if method == "card" or "card" in combined or "payment" in combined:
-        return "payments"
     if _text_has(combined, "ach"):
         return "ach_direct_debit"
     if "sepa" in combined:
@@ -685,7 +765,16 @@ def _infer_conditions(
         conditions.append(FeeCondition(dimension="channel", value=channel))
 
     if "currency conversion" in combined or "if currency conversion is required" in text:
-        conditions.append(FeeCondition(dimension="currency_conversion_required", value=True))
+        # A domestic-card heading followed by an international/currency-conversion
+        # note (e.g. a "Show additional fees" toggle) should not inherit the
+        # currency-conversion condition; it belongs to the separate international
+        # variant whose rate lives on the main pricing page.
+        currency_pos = text.find("currency conversion")
+        if currency_pos == -1:
+            currency_pos = text.find("if currency conversion is required")
+        domestic_pos = text.find("domestic")
+        if domestic_pos == -1 or currency_pos == -1 or domestic_pos > currency_pos:
+            conditions.append(FeeCondition(dimension="currency_conversion_required", value=True))
     if "standard settlement" in text:
         conditions.append(FeeCondition(dimension="settlement_timing", value="standard"))
     if "instant settlement" in text or "instant payout" in text:
@@ -1134,7 +1223,7 @@ def _classify_group(
         classification_status = CUSTOM_PRICING
     elif fee_evidence.type in {"marketing_prose", "hardware_price", "alphanumeric_method_name"}:
         classification_status = INFORMATIONAL
-    elif fee_evidence.type == "contradictory_fee_evidence" or (
+    elif fee_evidence.type in {"contradictory_fee_evidence", "cross_fragment_fee_evidence"} or (
         fee_evidence.type == "insufficient" and classification_status == CALCULABLE_RULE
     ):
         classification_status = NON_CALCULABLE
@@ -1299,11 +1388,16 @@ def _group_entries(entries: list[PricingEntry], account_country: str | None) -> 
             # positive-fee base row (e.g. a 30% marketing fragment next to an
             # included-pricing block).
             base_entry = group[0]["entry"]
+            base_hint = _entry_component_hint(base_entry)
             if (
                 _entry_component_hint(item["entry"]) in {"included", "free"}
-                and _entry_component_hint(base_entry) not in {"included", "free"}
+                and base_hint not in {"included", "free"}
                 and _has_base_fee(base_entry)
             ):
+                continue
+            # Modifiers must anchor to a real fee row (or an included/free row),
+            # never to marketing prose that happens to carry a number.
+            if not _has_base_fee(base_entry) and base_hint not in {"included", "free"}:
                 continue
             if item["variant_id"] == last["variant_id"]:
                 group.append(item)

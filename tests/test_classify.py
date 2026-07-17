@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from stripe_fee_crawler.classify import classify_entries, derive_market_fees
+from stripe_fee_crawler.components import Section, split_section_body_into_entries
 from stripe_fee_crawler.extract import extract_pricing_entries
 from stripe_fee_crawler.models import PricingEntry
 
@@ -503,3 +504,156 @@ def test_add_on_no_collision_with_base_payments() -> None:
     addon = [r for r in rules if r.product_id == "authorization_boost" and r.classification_status == "calculable_rule"]
     assert base and addon
     assert base[0].rule_id != addon[0].rule_id
+
+
+def test_split_qualifiers_attach_to_base_not_marketing() -> None:
+    """Trailing fee qualifiers must attach to the trusted fee row, not to a market-share paragraph."""
+    body = (
+        "Pix 2% per successful charge\n"
+        "per successful charge\n"
+        "Increase conversion with Brazilian customers by enabling Pix—the most popular payment method in Brazil, "
+        "with more than 40% share of online payments.\n"
+        "per successful charge\n"
+        "for international transactions\n"
+        "if currency conversion is required"
+    )
+    section = Section(
+        section_id="test",
+        heading="Pix 2% per successful charge",
+        level=3,
+        body=body,
+        section_path=["Payment methods", "Pix 2% per successful charge"],
+        source_order=0,
+    )
+    phrases = split_section_body_into_entries(section)
+    texts = [p[0] for p in phrases]
+    # The base should absorb the fee qualifiers both before and after the marketing prose.
+    base = next((t for t in texts if t.startswith("Pix 2% per successful charge") and "international" in t), None)
+    assert base, f"base phrase not found in {texts}"
+    assert "40%" not in base
+    # The market-share paragraph must remain separate.
+    assert any("40%" in t and "share" in t for t in texts)
+
+
+def test_no_upi_market_share_fee() -> None:
+    """A UPI marketing paragraph with 80% market share must not become a calculable fee."""
+    entries = [
+        PricingEntry(
+            entry_id="e0",
+            source_text="UPI 2% per successful charge per successful charge",
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "UPI 2% per successful charge"],
+        ),
+        PricingEntry(
+            entry_id="e1",
+            source_text=(
+                "Increase conversion with Indian customers by enabling UPI—the most popular payment method in India, "
+                "with more than 80% share of online payments."
+            ),
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "UPI 2% per successful charge"],
+        ),
+        PricingEntry(
+            entry_id="e2",
+            source_text="per successful charge",
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "UPI 2% per successful charge"],
+        ),
+        PricingEntry(
+            entry_id="e3",
+            source_text="for international transactions",
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "UPI 2% per successful charge"],
+        ),
+        PricingEntry(
+            entry_id="e4",
+            source_text="if currency conversion is required",
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "UPI 2% per successful charge"],
+        ),
+    ]
+    rules, _ = classify_entries(entries, "AU")
+    assert not any(r.classification_status == "calculable_rule" and r.percentage == "80" for r in rules), (
+        "UPI 80% market share was emitted as a calculable fee"
+    )
+    valid = [r for r in rules if r.classification_status == "calculable_rule" and r.product_id == "upi"]
+    assert valid, "valid UPI fee should remain"
+    assert any(r.percentage == "2" for r in valid)
+
+
+def test_no_pix_market_share_fee() -> None:
+    """A Pix marketing paragraph with 40% market share must not become a calculable fee."""
+    entries = [
+        PricingEntry(
+            entry_id="e0",
+            source_text="Pix 2% per successful charge per successful charge",
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "Pix 2% per successful charge"],
+        ),
+        PricingEntry(
+            entry_id="e1",
+            source_text=(
+                "Increase conversion with Brazilian customers by enabling Pix—the most popular payment method in Brazil, "
+                "with more than 40% share of online payments."
+            ),
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "Pix 2% per successful charge"],
+        ),
+        PricingEntry(
+            entry_id="e2",
+            source_text="per successful charge",
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "Pix 2% per successful charge"],
+        ),
+        PricingEntry(
+            entry_id="e3",
+            source_text="for international transactions",
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "Pix 2% per successful charge"],
+        ),
+        PricingEntry(
+            entry_id="e4",
+            source_text="if currency conversion is required",
+            source_url="https://stripe.com/au/pricing/local-payment-methods",
+            section_path=["Payment methods", "Pix 2% per successful charge"],
+        ),
+    ]
+    rules, _ = classify_entries(entries, "AU")
+    assert not any(r.classification_status == "calculable_rule" and r.percentage == "40" for r in rules), (
+        "Pix 40% market share was emitted as a calculable fee"
+    )
+    valid = [r for r in rules if r.classification_status == "calculable_rule" and r.product_id == "pix"]
+    assert valid, "valid Pix fee should remain"
+    assert any(r.percentage == "2" for r in valid)
+
+
+def test_currency_conversion_surcharge_not_attached_to_marketing() -> None:
+    """A +2% currency-conversion surcharge must not attach to a preceding marketing paragraph."""
+    entries = [
+        PricingEntry(
+            entry_id="e0",
+            source_text="1.7% + A$0.30 per successful charge for domestic cards",
+            source_url="https://stripe.com/au/pricing",
+            section_path=["Payments", "Cards and wallets"],
+        ),
+        PricingEntry(
+            entry_id="e1",
+            source_text=(
+                "Increase conversion with Brazilian customers by enabling Pix—the most popular payment method in Brazil."
+            ),
+            source_url="https://stripe.com/au/pricing",
+            section_path=["Payments", "Cards and wallets"],
+        ),
+        PricingEntry(
+            entry_id="e2",
+            source_text="+ 2% if currency conversion is required",
+            source_url="https://stripe.com/au/pricing",
+            section_path=["Payments", "Cards and wallets"],
+        ),
+    ]
+    rules, _ = classify_entries(entries, "AU")
+    marketing = [r for r in rules if "Pix" in (r.label or "") and r.classification_status == "calculable_rule"]
+    assert not marketing, "marketing paragraph should not become a calculable rule"
+    surcharges = [r for r in rules if r.classification_status == "calculable_rule" and r.percentage == "2"]
+    assert surcharges, "currency conversion surcharge should be retained"
+    assert all(r.payment_method == "card" for r in surcharges), "surcharge should stay attached to card payments"
