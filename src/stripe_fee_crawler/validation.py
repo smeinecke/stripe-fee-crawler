@@ -525,8 +525,17 @@ def _validate_rule_calculator_ready(rule: CoreFeeRule, market_code: str, errors:
     has_base = any(comp.type in base_types for comp in rule.fee_components)
     has_modifier = any(comp.type in modifier_types for comp in rule.fee_components)
     if has_modifier and not has_base:
-        # A surcharge-only rule is only valid when it applies a modifier condition.
-        modifier_dimensions = {"currency_conversion_required", "card_origin", "dispute_state", "transaction_type"}
+        # A surcharge-only rule is only valid when it applies a modifier condition
+        # (currency conversion, card/international origin, dispute/refund state, or
+        # cross-border transaction region).
+        modifier_dimensions = {
+            "currency_conversion_required",
+            "card_origin",
+            "dispute_state",
+            "transaction_type",
+            "cross_border",
+            "transaction_region",
+        }
         if not any(c.dimension in modifier_dimensions for c in rule.conditions):
             errors.append(
                 f"{market_code}/{rule.rule_id}: base fee appears to be classified only as a surcharge/modifier"
@@ -615,10 +624,13 @@ def _validate_rule_contradictory_evidence(
     evidence_phrases = [p.lower() for p in (rule.fee_evidence.phrases if rule.fee_evidence else [])]
     combined = f"{label} {' '.join(evidence_phrases)}"
     has_positive_fee = bool(re.search(r"[0-9]\s*%|[0-9]\s*[€£$¥A-Z]", combined))
+    # "interest-free" describes the buyer's financing, not the merchant fee,
+    # and must not be treated as a contradictory "free" statement.
+    included_free_check = re.sub(r"interest[-\s]?free", "", combined, flags=re.IGNORECASE)
     has_included_free = bool(
         re.search(
             r"(?<!\bnot\s)\bincluded\b|(?<!\bnot\s)\bfree\b|\bno additional charge\b|\bat no cost\b|\bno cost\b|\bno fee\b",
-            combined,
+            included_free_check,
         )
     )
     if has_positive_fee and has_included_free:
@@ -896,7 +908,11 @@ def _validate_rule_product_identity(
             )
 
     if rule.unit == "per_dispute" and rule.product_id not in {"disputes", "smart_disputes"}:
-        errors.append(f"{market_code}/{rule.rule_id}: unit=per_dispute used for non-dispute product {rule.product_id}")
+        fee_state_values = {c.value for c in rule.conditions if c.dimension in {"transaction_type", "dispute_state"}}
+        if not (fee_state_values & {"dispute", "lost", "won", "received", "countered"}):
+            errors.append(
+                f"{market_code}/{rule.rule_id}: unit=per_dispute used for non-dispute product {rule.product_id}"
+            )
 
 
 def _validate_rule_non_card_conditions(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:

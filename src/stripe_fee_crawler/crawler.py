@@ -175,6 +175,15 @@ class StripeCrawler:
                     )
                 )
 
+        # Renumber entries with a globally stable, page-aware source order so that
+        # main pricing and LPM pages do not reuse the same source_order values.
+        source_order_by_url = {src.canonical_url or src.requested_url: idx for idx, src in enumerate(sources)}
+        ordered_entries = sorted(
+            entries,
+            key=lambda e: (source_order_by_url.get(e.source_url, 0), e.source_order, e.entry_id),
+        )
+        entries = [entry.model_copy(update={"source_order": idx}) for idx, entry in enumerate(ordered_entries)]
+
         rules, unclassified, derivation_status, coverage_summary, calculator_coverage_status = derive_market_fees(
             entries, market=market
         )

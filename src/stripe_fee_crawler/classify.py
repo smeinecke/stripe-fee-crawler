@@ -101,6 +101,15 @@ _PAYMENT_METHOD_TOKENS: tuple[str, ...] = (
     "amazon_pay",
     "satispay",
     "konbini",
+    "apple_pay",
+    "google_pay",
+    "cash_app_pay",
+    "cash_app_afterpay",
+    "afterpay",
+    "clearpay",
+    "affirm",
+    "zip",
+    "sunbit",
     "tap_to_pay",
     "link",
     "card",
@@ -149,6 +158,10 @@ _POSITIVE_FEE_TERMS: tuple[str, ...] = (
     "payment fee",
     "currency conversion",
     "foreign exchange",
+    "for international",
+    "for domestic",
+    "cross-border",
+    "cross border",
 )
 
 _MARKETING_TERMS: tuple[str, ...] = (
@@ -269,6 +282,13 @@ def _is_explicit_fee_phrase(text: str) -> bool:
 
 def _is_marketing_prose(text: str) -> bool:
     """Return True for statistics, volume claims, and other marketing copy."""
+    lower = text.lower()
+    # Volume/audience claims are marketing even if they also contain fee-adjacent
+    # words such as "monthly" or "payments".
+    if ("million" in lower or "billion" in lower or "trillion" in lower) and (
+        "customers" in lower or "users" in lower or "addressable" in lower or "process" in lower
+    ):
+        return True
     # A phrase that already contains explicit fee language is a fee description,
     # not marketing prose (e.g. "Customers will be presented a conversion fee").
     if _is_explicit_fee_phrase(text):
@@ -385,7 +405,11 @@ def _fee_evidence_for_group(
     base_entry = group[0]["entry"]
     combined = _source_text_for_group(group)
     entry_ids = [item["entry"].entry_id for item in group]
-    raw_phrases = [item["entry"].source_text for item in group]
+    raw_phrases = [
+        item["entry"].source_text
+        for item in group
+        if not _is_marketing_prose(_dedup_repeated_phrases(item["entry"].source_text))
+    ]
     phrases = _ordered_unique(_dedup_repeated_phrases(p) for p in raw_phrases)
 
     # 1. Promotional / conditional pricing is never a concrete fee.
@@ -560,19 +584,57 @@ def _earliest_payment_method(text: str, max_word_index: int | None = None) -> st
     return best[2] if best else None
 
 
+def _method_from_surcharge_context(entry: PricingEntry) -> str | None:
+    """Find the payment method named in a surcharge's qualifier phrase.
+
+    Surcharges such as ``+ $0.10 per authorization for Tap to Pay`` name the
+    method in the same ``for``/``of``/``per``/``optional`` qualifier.  We only
+    trust the surcharge's own source_text; the surrounding section evidence is too
+    broad and can otherwise pull in unrelated methods from sibling rows.
+
+    When the surcharge source text trails off with ``for`` or ``for optional``,
+    the very next line of per-entry evidence is the method being qualified.
+    """
+    text = entry.source_text or ""
+    text_lower = text.lower()
+    for method in _PAYMENT_METHOD_TOKENS:
+        display = method.replace("_", " ")
+        if re.search(rf"\b(?:for|of|per|optional)\s+{re.escape(display)}s?\b", text_lower):
+            return method
+
+    # Trailing "for" or "for optional" defers the method to the next evidence line.
+    if re.search(r"\b(for|for optional)\s*$", text_lower):
+        first_evidence = (entry.source_evidence or "").splitlines()[0] if (entry.source_evidence or "") else ""
+        first_evidence_lower = first_evidence.lower()
+        for method in _PAYMENT_METHOD_TOKENS:
+            display = method.replace("_", " ")
+            if re.search(rf"\b{re.escape(display)}s?\b", first_evidence_lower):
+                return method
+    return None
+
+
 def _infer_payment_method(entry: PricingEntry) -> str | None:
-    text = " ".join(entry.section_path + [entry.source_text]).lower()
+    evidence = entry.source_evidence or ""
+    text = " ".join(entry.section_path + [entry.source_text, evidence]).lower()
     # Phrase-level tokens win over generic section headings, but a method name
     # must appear at the start of the phrase/heading.  This prevents hidden LPM
     # card content ("for Instant Bank Payments", "for Klarna") from hijacking
     # the method identity of a Link, Card payments, etc. base fee.
-    if "tap to pay" in text:
+    # Only treat the entry as tap_to_pay when the phrase itself starts with the
+    # method; marketing prose in the surrounding evidence must not hijack the
+    # primary card method.
+    if "tap to pay" in (entry.source_text.lower() + " " + " ".join(entry.section_path).lower()):
         return "tap_to_pay"
     leading = _earliest_payment_method(entry.source_text, max_word_index=1)
     if leading:
         if leading == "terminal" and "card" in entry.source_text.lower():
             return "card"
         return leading
+    # Surcharge fragments may name their method in a trailing qualifier.
+    if entry.source_text.strip().startswith("+"):
+        surcharge_method = _method_from_surcharge_context(entry)
+        if surcharge_method:
+            return surcharge_method
     # Fall back to the earliest explicit method token anywhere in the text.
     earliest = _earliest_payment_method(text)
     if earliest:
@@ -589,10 +651,14 @@ def _infer_payment_method(entry: PricingEntry) -> str | None:
 def _infer_channel(entry: PricingEntry) -> str | None:
     if entry.channel:
         return entry.channel
-    text = " ".join(entry.section_path + [entry.source_text]).lower()
+    evidence = entry.source_evidence or ""
+    text = " ".join(entry.section_path + [entry.source_text, evidence]).lower()
     if "terminal" in text or "in-person" in text or "in person" in text or "tap to pay" in text or "reader" in text:
         return "in_person"
     if "online" in text or "checkout" in text or "payment link" in text:
+        return "online"
+    # Card/payment entries with no in-person signal are online by default.
+    if "card" in text or "payment" in text or "wallet" in text:
         return "online"
     return None
 
@@ -670,6 +736,43 @@ def _product_from_heading(fee_category: str | None) -> str | None:
         if re.search(rf"\b{re.escape(keyword)}", lower):
             return product
     return None
+
+
+def _is_dedicated_dispute_refund_fee(entry: PricingEntry) -> bool:
+    """Return True when the fee amount belongs to a dispute/refund/failure caption.
+
+    A payment-method base fee may trail off with text-only dispute/refund/failure
+    qualifiers (e.g. "... for disputed payments").  Those must keep the method
+    product.  A dedicated fee has the amount immediately before the keyword
+    (e.g. "$15.00 for disputed payments", "$0.50 per successful refund").
+    """
+    text = entry.source_text
+    if not text:
+        return False
+    keywords = [
+        "for lost disputes",
+        "disputed payment",
+        "failed payment",
+        "per successful refund",
+        "refund",
+    ]
+    text_lower = text.lower()
+    for keyword in keywords:
+        pos = text_lower.find(keyword)
+        if pos == -1:
+            continue
+        # Find the last numeric token before the keyword.
+        prefix = text[:pos]
+        last_number: re.Match[str] | None = None
+        for match in re.finditer(r"\d+(?:\.\d+)?", prefix):
+            last_number = match
+        if last_number is None:
+            continue
+        distance = pos - last_number.end()
+        # The amount should be immediately before the keyword (a handful of words apart).
+        if distance <= 40:
+            return True
+    return False
 
 
 def _infer_product_id(entry: PricingEntry) -> str:
@@ -816,7 +919,9 @@ def _infer_exactness(parsed: dict[str, Any], phrase: str) -> str:
         return "custom"
     if "starting at" in lower or "starting from" in lower:
         return "from"
-    if _text_has(lower, "up to", "capped at", "cap at", "cap", "maximum", "max"):
+    if _text_has(lower, "capped at", "cap at", "cap", "maximum", "max"):
+        return "range"
+    if "up to" in lower and not re.search(r"up to \d+\s?(month|months|day|days|week|weeks|year|years)", lower):
         return "range"
     if "minimum" in lower or "min" in lower:
         return "from"
@@ -912,6 +1017,18 @@ def _infer_conditions(
         if "conversion" in combined:
             conditions.append(FeeCondition(dimension="fee_type", value="conversion_fee"))
 
+    # Dedicated dispute/refund/failure fees keep their payment-method product but
+    # carry a transaction_type/dispute_state condition so they do not pollute the
+    # base method rule.
+    if _is_dedicated_dispute_refund_fee(entry):
+        if "lost disputes" in combined or "disputed payment" in combined:
+            conditions.append(FeeCondition(dimension="dispute_state", value="lost"))
+            conditions.append(FeeCondition(dimension="transaction_type", value="dispute"))
+        elif "failed payment" in combined:
+            conditions.append(FeeCondition(dimension="transaction_type", value="failed"))
+        elif "refund" in combined:
+            conditions.append(FeeCondition(dimension="transaction_type", value="refund"))
+
     # Dispute/refund/failure state is only meaningful for the dispute/refund
     # product families.  A trailing "for lost disputes" qualifier on a payment-
     # method base fee must not turn that base fee into a dispute-only rule.
@@ -949,8 +1066,13 @@ def _infer_conditions(
 
 def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
     text = entry.source_text.lower()
-    if product_id == "disputes":
+    is_dedicated = _is_dedicated_dispute_refund_fee(entry)
+    if product_id == "disputes" or (
+        is_dedicated and ("disputed payment" in text or "lost disputes" in text or "smart dispute" in text)
+    ):
         return "per_dispute"
+    if is_dedicated and "failed payment" in text:
+        return "per_attempt"
     if "per month" in text or "monthly" in text:
         return "monthly"
     if "per year" in text or "yearly" in text:
@@ -1094,10 +1216,12 @@ def _entry_component_hint(entry: PricingEntry) -> str:
         return "free"
     if exactness == "custom" or "contact sales" in lower:
         return "custom"
-    if entry.source_text.strip().startswith("+") and not _is_tap_to_pay(entry):
-        return "surcharge"
     if exactness == "from" or "starting at" in lower or "starting from" in lower:
         return "from"
+    tokens = entry.tokens or parsed.get("tokens") or []
+    is_single_surcharge_token = len(tokens) == 1 and tokens[0].operator == "+" and not _is_tap_to_pay(entry)
+    if (entry.source_text.strip().startswith("+") or is_single_surcharge_token) and not _is_tap_to_pay(entry):
+        return "surcharge"
     return "base"
 
 
@@ -1160,7 +1284,12 @@ def _build_components_for_entry(entry: PricingEntry, hint: str) -> list[FeeCompo
 
     for token in tokens:
         if token.kind == "percentage":
-            comp_type = "percentage_surcharge" if hint == "surcharge" else "percentage"
+            if hint == "surcharge":
+                comp_type = "percentage_surcharge"
+            elif hint == "from":
+                comp_type = "percentage"
+            else:
+                comp_type = "percentage"
             components.append(
                 FeeComponent(
                     type=comp_type,

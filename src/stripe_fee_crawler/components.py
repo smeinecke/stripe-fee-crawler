@@ -123,25 +123,68 @@ def _build_section_tree(
     return sections
 
 
+def _is_pricing_grid_price(element: Any) -> bool:
+    """Return True for the pricing-grid price containers used on LPM pages."""
+    return element.tag == "section" and "PricingGridPrice" in (element.get("class") or "")
+
+
+def _price_row_text(element: Any) -> str:
+    """Extract caption, amount and label text from a PricingGridPrice section."""
+    parts: list[str] = []
+    for cls, tag in (
+        ("PricingGridPrice__caption", None),
+        ("PricingGridPrice__amount", "strong"),
+        ("PricingGridPrice__label", "span"),
+    ):
+        if tag:
+            nodes = element.xpath(f".//{tag}[contains(@class,'{cls}')]")
+        else:
+            nodes = element.xpath(f".//*[contains(@class,'{cls}')]")
+        if nodes:
+            text = clean_fee_text(extract_text(nodes[0]))
+            if text:
+                parts.append(text)
+    return " ".join(parts)
+
+
+def _method_title_from_card(card: Any) -> str | None:
+    """Return the method title from an LPM card heading."""
+    for xpath in (
+        ".//h4[contains(@class,'LocalPaymentMethodsPricingCardHeader__title')]/text()",
+        ".//h4",
+        ".//h3//button",
+        ".//h3",
+    ):
+        try:
+            nodes = card.xpath(xpath)
+        except Exception:  # nosec B112 - malformed xpaths are intentionally skipped
+            continue
+        if nodes:
+            text = clean_fee_text(extract_text(nodes[0]) if not isinstance(nodes[0], str) else nodes[0])
+            if text:
+                return text
+    return None
+
+
 def _extract_local_payment_method_cards(tree: Any, base_url: str) -> list[Section]:
     """Extract method cards from the local payment methods page.
 
     Each card has a data-js-controller="LocalPaymentMethodsPricingCard" and
     contains a heading with the method name and fee text. The cards are grouped
     by preceding section headings (Cards, Wallets, etc.).
+
+    Cards built with the newer ``PricingGridPrice`` layout emit one section per
+    price row so that multiple variants (e.g. Link domestic, Instant Bank
+    Payments, Klarna) are not squashed into a single concatenated phrase.
+    Subprices inside a ``PricingGridPrice`` (e.g. ``+ 1.5% for international
+    transactions``) are extracted as separate rows with the same caption context.
     """
     sections: list[Section] = []
     cards = tree.xpath("//*[@data-js-controller='LocalPaymentMethodsPricingCard']")
 
     current_family = "Payment methods"
-    for order, card in enumerate(cards):
-        heading_button = card.xpath(".//h3//button | .//h3")
-        if not heading_button:
-            continue
-        heading_text = clean_fee_text(extract_text(heading_button[0]))
-        if not heading_text:
-            continue
-
+    order = 0
+    for card in cards:
         # Determine family from the nearest preceding h2 or from the heading text.
         family = current_family
         for prev in card.itersiblings(preceding=True):
@@ -152,33 +195,115 @@ def _extract_local_payment_method_cards(tree: Any, base_url: str) -> list[Sectio
                     current_family = family
                     break
 
-        section_path = [family, heading_text]
-        section_id = _section_id_from_path(section_path)
-        # Preserve line breaks between paragraphs so split_section_body_into_entries
-        # can separate multi-variant cards (e.g. standard/premium EEA cards).
-        # Include the card heading as the first paragraph when it carries a fee
-        # formula; LPM cards put the rate in the heading while the body is
-        # descriptive prose.
-        paragraphs: list[str] = []
-        if heading_text and re.search(r"[0-9]\s*%|[0-9]\s*[€£$¥A-Z]|included|free", heading_text):
-            paragraphs.append(heading_text)
-        for para in card.iter("p", "li"):
-            text = clean_fee_text(extract_text(para))
-            if text:
-                paragraphs.append(text)
-        body = "\n".join(paragraphs) if paragraphs else clean_fee_text(extract_text(card))
-        links = extract_links(card, base_url)
-        sections.append(
-            Section(
-                section_id=section_id,
-                heading=heading_text,
-                level=3,
-                body=body,
-                section_path=section_path,
-                source_order=order,
-                links=links,
+        method_title = _method_title_from_card(card)
+        price_sections = [el for el in card.iter() if _is_pricing_grid_price(el)]
+
+        if not price_sections:
+            # Legacy/simple fixture layout: fee text lives in <p>/<li> children.
+            heading_button = card.xpath(".//h3//button | .//h3")
+            if not heading_button:
+                continue
+            heading_text = clean_fee_text(extract_text(heading_button[0]))
+            if not heading_text:
+                continue
+            section_path = [family, heading_text]
+            paragraphs: list[str] = []
+            if heading_text and re.search(r"[0-9]\s*%|[0-9]\s*[€£$¥A-Z]|included|free", heading_text):
+                paragraphs.append(heading_text)
+            for para in card.iter("p", "li"):
+                text = clean_fee_text(extract_text(para))
+                if text:
+                    paragraphs.append(text)
+            body = "\n".join(paragraphs) if paragraphs else clean_fee_text(extract_text(card))
+            links = extract_links(card, base_url)
+            sections.append(
+                Section(
+                    section_id=_section_id_from_path(section_path),
+                    heading=heading_text,
+                    level=3,
+                    body=body,
+                    section_path=section_path,
+                    source_order=order,
+                    links=links,
+                )
             )
-        )
+            order += 1
+            continue
+
+        # Newer grid layout: one section per PricingGridPrice/base row and one per
+        # PricingGridSubprice surcharge row.
+        current_price: Any | None = None
+        current_body_parts: list[str] = []
+
+        for element in card.iter():
+            if _is_pricing_grid_price(element):
+                # Finalise the body for the previous price row.
+                if current_price is not None and current_body_parts:
+                    sections[-1] = sections[-1].model_copy(update={"body": "\n".join(current_body_parts)})
+                    current_body_parts = []
+
+                base_text = _price_row_text(element)
+                if base_text:
+                    heading = base_text
+                    if method_title and not heading.lower().startswith(method_title.lower()):
+                        heading = f"{method_title} {base_text}"
+                    section_path = [family, heading]
+                    sections.append(
+                        Section(
+                            section_id=_section_id_from_path(section_path),
+                            heading=heading,
+                            level=3,
+                            body="",
+                            section_path=section_path,
+                            source_order=order,
+                            links=extract_links(card, base_url),
+                        )
+                    )
+                    order += 1
+                current_price = element
+
+                # Subprices belong to the same pricing row but are separate fees.
+                caption = clean_fee_text(
+                    extract_text(element.xpath(".//*[contains(@class,'PricingGridPrice__caption')]")[0])
+                    if element.xpath(".//*[contains(@class,'PricingGridPrice__caption')]")
+                    else ""
+                )
+                for sub in element.xpath(".//div[contains(@class,'PricingGridSubprice')]"):
+                    sub_text = clean_fee_text(extract_text(sub))
+                    if sub_text:
+                        sub_heading = f"{caption} {sub_text}" if caption else sub_text
+                        heading = sub_heading
+                        if method_title and not heading.lower().startswith(method_title.lower()):
+                            heading = f"{method_title} {sub_heading}"
+                        section_path = [family, heading]
+                        sections.append(
+                            Section(
+                                section_id=_section_id_from_path(section_path),
+                                heading=heading,
+                                level=3,
+                                body="",
+                                section_path=section_path,
+                                source_order=order,
+                                links=extract_links(card, base_url),
+                            )
+                        )
+                        order += 1
+                continue
+
+            if current_price is None:
+                continue
+            # Skip nested elements of the current price section; their text has
+            # already been captured by the base/subprice sections.
+            if element in current_price.iterdescendants():
+                continue
+            if element.tag in {"p", "li"}:
+                text = clean_fee_text(extract_text(element))
+                if text and text not in current_body_parts:
+                    current_body_parts.append(text)
+
+        if current_price is not None and current_body_parts:
+            sections[-1] = sections[-1].model_copy(update={"body": "\n".join(current_body_parts)})
+
     return sections
 
 
@@ -288,6 +413,14 @@ def split_section_body_into_entries(section: Section) -> list[tuple[str, list[Fe
     if not section.body:
         return []
     raw_lines = [clean_fee_text(line) for line in section.body.splitlines()]
+    # If the section heading itself is a fee phrase, make it the first line so
+    # that trailing qualifiers in the body (e.g. "per successful transaction for
+    # domestic cards") attach to the heading fee.  Avoid duplicating the heading
+    # when LPM cards have already inlined it in the body.
+    if section.heading and _is_feeish_line(section.heading):
+        heading = clean_fee_text(section.heading)
+        if raw_lines[0:1] != [heading]:
+            raw_lines.insert(0, heading)
     lines = [line for line in raw_lines if line]
 
     qualifier_pattern = re.compile(

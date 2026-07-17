@@ -136,7 +136,31 @@ def extract_pricing_entries(
         if not phrases and section.heading and _fee_phrase_in_section(section.heading):
             phrases = [(section.heading, parse_fee_value(section.heading)["tokens"])]
 
+        # Build per-entry evidence from the remaining text after each phrase.  This
+        # keeps qualifiers such as "Tap to Pay" or "point-to-point-encryption"
+        # bound to the surcharge they immediately follow.  The phrase may have been
+        # reassembled with collapsed whitespace, so match whitespace flexibly.
+        full_text = f"{section.heading or ''}\n{section.body or ''}"
+        offset = 0
         for index, (phrase, tokens) in enumerate(phrases):
+            pattern = r"\s*".join(re.escape(part) for part in phrase.split())
+            match = re.search(pattern, full_text[offset:], re.IGNORECASE)
+            if not match:
+                evidence = section.body
+            else:
+                end = offset + match.end()
+                evidence = full_text[end:].strip()
+                offset = end
+
+            # Surcharges that trail off with "for" or "for optional" name the
+            # target method/feature on the next evidence line.  Include that line
+            # in the source text so the derived rule label is explicit.
+            if phrase.startswith("+") and re.search(r"\b(for|for optional)\s*$", phrase):
+                next_line = next((ln for ln in (evidence or "").splitlines() if ln.strip()), "")
+                if next_line and not re.search(r"\d", next_line):
+                    phrase = f"{phrase} {next_line.strip()}"
+                    tokens = parse_fee_value(phrase)["tokens"]
+
             product = section.section_path[0] if section.section_path else None
             fee_category = section.section_path[-1] if section.section_path else None
             payment_method = _infer_payment_method(section, phrase)
@@ -152,7 +176,7 @@ def extract_pricing_entries(
                     channel=_infer_channel(section.section_path, phrase),
                     source_text=phrase,
                     source_url=source_url,
-                    source_evidence=section.body,
+                    source_evidence=evidence,
                     tokens=tokens,
                     links=section.links,
                     source_order=order,
