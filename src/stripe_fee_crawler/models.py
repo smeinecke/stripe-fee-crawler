@@ -263,6 +263,43 @@ class FeeCondition(BaseModel):
     evidence: str | None = None
 
 
+class FeeEvidence(BaseModel):
+    """Positive or negative evidence supporting a fee classification decision."""
+
+    model_config = ConfigDict(frozen=True)
+
+    type: str
+    source_entry_ids: list[str] = Field(default_factory=list)
+    phrases: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+
+    @field_validator("type")
+    @classmethod
+    def _type_allowed(cls, value: str) -> str:
+        allowed = {
+            "explicit_fee_phrase",
+            "pricing_table_value",
+            "structured_fee_field",
+            "product_price",
+            "marketing_prose",
+            "promotional_language",
+            "hardware_price",
+            "alphanumeric_method_name",
+            "insufficient",
+            "custom_pricing",
+            "included",
+            "free",
+        }
+        if value not in allowed:
+            raise ValueError(f"fee_evidence type must be one of {allowed}")
+        return value
+
+    @field_validator("confidence")
+    @classmethod
+    def _confidence_range(cls, value: float) -> float:
+        return max(0.0, min(1.0, float(value)))
+
+
 class FeeRule(BaseModel):
     """A derived calculation-ready fee rule.
 
@@ -321,6 +358,7 @@ class FeeRule(BaseModel):
     classification_status: str = "unclassified"
     confidence: float = 0.0
     classification_evidence: list[str] = Field(default_factory=list)
+    fee_evidence: FeeEvidence | None = None
 
     @field_validator("exactness")
     @classmethod
@@ -571,6 +609,8 @@ class CoreFeeRule(BaseModel):
     behavior: str = "additive"
     classification_status: str = "unclassified"
     exactness: str = "exact"
+    confidence: float = 0.0
+    fee_evidence: FeeEvidence | None = None
 
     @field_validator("classification_status")
     @classmethod

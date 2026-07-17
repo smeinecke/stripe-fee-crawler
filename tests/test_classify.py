@@ -241,3 +241,65 @@ def test_de_international_card_rate(de_pricing_html: str) -> None:
     assert international[0].percentage == "3.25"
     assert international[0].fixed_amount == "0.25"
     assert international[0].fixed_currency == "EUR"
+
+
+# Negative regression fixtures for known false positives.
+
+
+def test_no_calculable_from_billion_marketing_claim() -> None:
+    entry = PricingEntry(
+        entry_id="billion",
+        source_text="100+ category leaders each process more than $1 billion per year on Stripe.",
+        source_url="https://stripe.com/pricing",
+        section_path=["Payments"],
+    )
+    rules, _ = classify_entries([entry])
+    assert not any(r.classification_status == "calculable_rule" for r in rules)
+
+
+def test_no_calculable_from_alphanumeric_method_name() -> None:
+    entry = PricingEntry(
+        entry_id="p24",
+        source_text="from the P24 portal",
+        source_url="https://stripe.com/pricing",
+        section_path=["Payment methods", "Przelewy24"],
+    )
+    rules, _ = classify_entries([entry])
+    assert not any(r.classification_status == "calculable_rule" for r in rules)
+
+
+def test_no_calculable_from_terminal_hardware_price() -> None:
+    entry = PricingEntry(
+        entry_id="terminal-price",
+        source_text="A$89.00",
+        source_url="https://stripe.com/pricing",
+        section_path=["Terminal", "Reader"],
+    )
+    rules, _ = classify_entries([entry])
+    assert not any(r.classification_status == "calculable_rule" for r in rules)
+
+
+def test_no_calculable_from_promotional_conditional_rate() -> None:
+    entry = PricingEntry(
+        entry_id="klarna-promo",
+        source_text=(
+            "Certain businesses may qualify for temporarily reduced rates on selected local payment methods, "
+            "including Klarna, that Stripe enables for you. These payment methods will be available for "
+            "1.7% + A$0.30 per transaction for at least 2 months."
+        ),
+        source_url="https://stripe.com/pricing",
+        section_path=["Payment methods", "Klarna"],
+    )
+    rules, _ = classify_entries([entry])
+    assert not any(r.classification_status == "calculable_rule" for r in rules)
+
+
+def test_calculable_when_explicit_fee_phrase_present() -> None:
+    entry = PricingEntry(
+        entry_id="clear-fee",
+        source_text="2.2% + 20p per transaction for Przelewy24",
+        source_url="https://stripe.com/pricing",
+        section_path=["Payment methods", "Przelewy24"],
+    )
+    rules, _ = classify_entries([entry])
+    assert any(r.classification_status == "calculable_rule" for r in rules)

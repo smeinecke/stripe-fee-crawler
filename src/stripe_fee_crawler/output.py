@@ -577,6 +577,8 @@ def _to_core_fee_rule(rule: FeeRule) -> CoreFeeRule:
         classification_status=rule.classification_status
         if rule.classification_status in {"classified", "calculable_rule"}
         else "calculable_rule",
+        confidence=rule.confidence,
+        fee_evidence=rule.fee_evidence,
     )
 
 

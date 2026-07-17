@@ -136,7 +136,12 @@ def _extract_local_payment_method_cards(tree: Any, base_url: str) -> list[Sectio
         section_id = _section_id_from_path(section_path)
         # Preserve line breaks between paragraphs so split_section_body_into_entries
         # can separate multi-variant cards (e.g. standard/premium EEA cards).
+        # Include the card heading as the first paragraph when it carries a fee
+        # formula; LPM cards put the rate in the heading while the body is
+        # descriptive prose.
         paragraphs: list[str] = []
+        if heading_text and re.search(r"[0-9]\s*%|[0-9]\s*[€£$¥A-Z]|included|free", heading_text):
+            paragraphs.append(heading_text)
         for para in card.iter("p", "li"):
             text = clean_fee_text(extract_text(para))
             if text:

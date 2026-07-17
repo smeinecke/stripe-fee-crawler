@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import subprocess  # nosec B404
 from decimal import Decimal
 from pathlib import Path
@@ -281,6 +282,63 @@ def _is_calculable_status(status: str) -> bool:
     return status in {"classified", "calculable_rule"}
 
 
+_PUBLICATION_CONFIDENCE_THRESHOLD = 0.7
+
+
+def _currency_label_markers(currency: str) -> set[str]:
+    """Return the currency code plus any known symbols for that currency."""
+    from .pricing_tokens import CURRENCY_SYMBOLS
+
+    markers = {currency.upper(), currency.lower()}
+    for symbol, code in CURRENCY_SYMBOLS.items():
+        if code.upper() == currency.upper():
+            markers.add(symbol)
+            markers.add(symbol.lower())
+    return markers
+
+
+def _minor_symbol_for_currency(currency: str) -> str | None:
+    """Return the minor-currency symbol (e.g. 'p' for GBP, '¢' for USD)."""
+    from .pricing_tokens import CURRENCY_SYMBOLS
+
+    for symbol, code in CURRENCY_SYMBOLS.items():
+        if code.upper() == currency.upper() and symbol in {"p", "¢"}:
+            return symbol
+    return None
+
+
+def _label_references_component(
+    label: str,
+    amount: str,
+    currency: str | None,
+    minor_amount: str | None = None,
+) -> bool:
+    """Check whether the source label contains the amount and currency."""
+    if not amount:
+        return True
+    lower = label.lower()
+    # Direct amount string match (e.g. "0.25" or "0,25").
+    if amount in lower:
+        return True
+    # Try parsing numeric tokens in the label and compare value.
+    amount_dec = Decimal(amount) if re.match(r"^[0-9.,]+$", amount) else None
+    if amount_dec is not None:
+        for match in re.finditer(r"[0-9][0-9\s,.]*", lower):
+            candidate = match.group().replace(" ", "").replace(",", ".")
+            try:
+                if Decimal(candidate) == amount_dec:
+                    return True
+            except Exception:  # nosec B110
+                pass
+    # For minor-currency amounts the label may contain the raw minor text ("20p").
+    minor_symbol = _minor_symbol_for_currency(currency) if currency else None
+    if minor_symbol and minor_amount:
+        pattern = rf"{re.escape(minor_amount)}\s*{re.escape(minor_symbol)}"
+        if re.search(pattern, lower):
+            return True
+    return False
+
+
 def _validate_component_currency_exponents(
     rule: CoreFeeRule,
     comp: FeeComponent,
@@ -338,6 +396,66 @@ def _validate_rule_calculator_ready(rule: CoreFeeRule, market_code: str, errors:
             errors.append(
                 f"{market_code}/{rule.rule_id}: base fee appears to be classified only as a surcharge/modifier"
             )
+
+    # Positive-fee evidence is required for publication.
+    evidence = rule.fee_evidence
+    positive_evidence_types = {"explicit_fee_phrase", "pricing_table_value", "structured_fee_field"}
+    negative_evidence_types = {
+        "marketing_prose",
+        "promotional_language",
+        "hardware_price",
+        "alphanumeric_method_name",
+        "insufficient",
+    }
+    if evidence is None:
+        errors.append(f"{market_code}/{rule.rule_id}: calculable rule has no fee_evidence")
+    elif evidence.type in negative_evidence_types:
+        errors.append(f"{market_code}/{rule.rule_id}: calculable rule has negative fee_evidence {evidence.type}")
+    elif evidence.type not in positive_evidence_types:
+        errors.append(
+            f"{market_code}/{rule.rule_id}: calculable rule has unsupported fee_evidence type {evidence.type}"
+        )
+
+    if rule.confidence < _PUBLICATION_CONFIDENCE_THRESHOLD:
+        errors.append(f"{market_code}/{rule.rule_id}: confidence {rule.confidence} below publication threshold")
+
+    # Suspicious-rule audit.
+    label = (rule.label or "").lower()
+    has_percentage = any(comp.type in {"percentage", "percentage_surcharge"} for comp in rule.fee_components)
+    fixed_components = [c for c in rule.fee_components if c.type == "fixed_amount"]
+    largest_fixed = max(
+        (Decimal(c.amount) for c in fixed_components if c.amount),
+        default=Decimal("0"),
+    )
+
+    if rule.unit == "yearly" and (evidence is None or evidence.type not in positive_evidence_types):
+        errors.append(f"{market_code}/{rule.rule_id}: yearly rule lacks explicit fee evidence")
+
+    if rule.unit == "per_transaction" and largest_fixed >= Decimal("10") and not has_percentage:
+        errors.append(
+            f"{market_code}/{rule.rule_id}: large one-time fixed amount {largest_fixed} labeled per_transaction"
+        )
+
+    if evidence and evidence.type == "alphanumeric_method_name":
+        errors.append(f"{market_code}/{rule.rule_id}: amount appears to be extracted from a product/method name")
+
+    # The source label should contain or reference the fee components.
+    if fixed_components:
+        for comp in fixed_components:
+            if not comp.amount:
+                continue
+            if not _label_references_component(label, comp.amount, comp.currency, comp.minor_amount):
+                errors.append(
+                    f"{market_code}/{rule.rule_id}: source label does not reference fixed amount "
+                    f"{comp.amount} {comp.currency}"
+                )
+                continue
+            if comp.currency:
+                markers = _currency_label_markers(comp.currency)
+                if not any(m in label for m in markers):
+                    errors.append(
+                        f"{market_code}/{rule.rule_id}: source label does not reference currency {comp.currency}"
+                    )
 
 
 def _validate_rule_percentage_consistency(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:

@@ -185,17 +185,42 @@ def _extract_currency_and_amount(text: str) -> list[dict[str, Any]]:
 
     Supports prefix/suffix symbols and ISO codes, optional whitespace, and
     minor-currency symbols such as ``20p`` (0.20 GBP) and ``5¢`` (0.05 USD).
+    Requires word boundaries so product codes like ``P24`` or prose like
+    ``from the P24 portal`` are not parsed as amounts, and skips marketing
+    magnitudes such as ``$1 billion``.
     """
-    symbol_pattern = "|".join(re.escape(s) for s in sorted(CURRENCY_SYMBOLS, key=len, reverse=True))
+    # Minor symbols are only valid as suffixes.
+    major_symbols = {s for s in CURRENCY_SYMBOLS if s not in MINOR_CURRENCY_SYMBOLS}
+    minor_symbols = MINOR_CURRENCY_SYMBOLS
+    symbol_pattern_major = "|".join(re.escape(s) for s in sorted(major_symbols, key=len, reverse=True))
+    symbol_pattern_minor = "|".join(re.escape(s) for s in sorted(minor_symbols, key=len, reverse=True))
+    symbol_pattern_all = "|".join(re.escape(s) for s in sorted(CURRENCY_SYMBOLS, key=len, reverse=True))
     code_pattern = "|".join(re.escape(c) for c in CURRENCY_CODES)
+
+    amount_group = r"(?P<amount>[0-9][0-9\s,.]*)"
+    amount_group_nb = r"(?P<amount>[0-9][0-9,.]*)"
+
     patterns: list[tuple[str, str, str]] = [
-        ("symbol_prefix", rf"(?P<symbol>{symbol_pattern})\s*(?P<amount>[0-9][0-9\s,.]*)", "symbol"),
-        ("symbol_suffix", rf"(?P<amount>[0-9][0-9\s,.]*)\s*(?P<symbol>{symbol_pattern})", "symbol"),
-        ("code_prefix", rf"(?P<code>{code_pattern})\s*(?P<amount>[0-9][0-9\s,.]*)", "code"),
-        ("code_suffix", rf"(?P<amount>[0-9][0-9\s,.]*)\s*(?P<code>{code_pattern})", "code"),
+        # Major-symbol prefix: A$89, $100, € 1.50
+        ("symbol_prefix", rf"(?P<symbol>{symbol_pattern_major})\s*{amount_group_nb}", "symbol"),
+        # Symbol suffix: 100 USD, 20p, 5¢, 100 kr
+        ("symbol_suffix", rf"{amount_group}\s*(?P<symbol>{symbol_pattern_all})(?!\w)", "symbol"),
+        # ISO-code prefix: USD 100
+        ("code_prefix", rf"(?P<code>{code_pattern})\s*{amount_group_nb}", "code"),
+        # ISO-code suffix: 100 USD
+        ("code_suffix", rf"{amount_group}\s*(?P<code>{code_pattern})(?!\w)", "code"),
+        # Minor-symbol suffix without whitespace: 20p, 5¢
+        ("symbol_minor_tight", rf"(?P<amount>[0-9][0-9,.]*)(?P<symbol>{symbol_pattern_minor})(?!\w)", "symbol"),
     ]
+
     seen_spans: list[tuple[int, int]] = []
     results: list[tuple[int, int, dict[str, Any]]] = []
+    marketing_magnitudes = ("billion", "million", "trillion")
+
+    def _char_at(idx: int) -> str | None:
+        if 0 <= idx < len(text):
+            return text[idx]
+        return None
 
     for _match_type, pattern, group in patterns:
         for match in re.finditer(pattern, text):
@@ -204,10 +229,36 @@ def _extract_currency_and_amount(text: str) -> list[dict[str, Any]]:
             if any(span[0] < end and span[1] > start for start, end in seen_spans):
                 continue
             symbol_or_code = match.group(group)
-            amount_text = match.group("amount").replace(" ", "")
+            raw_amount = match.group("amount")
+            amount_text = raw_amount.replace(" ", "")
             amount = _parse_decimal(amount_text)
             if amount is None:
                 continue
+
+            # Reject matches that sit inside a longer alphanumeric token.
+            before = _char_at(span[0] - 1) if span[0] > 0 else None
+            after = _char_at(span[1]) if span[1] < len(text) else None
+            amount_start = match.start("amount")
+            amount_before = _char_at(amount_start - 1) if amount_start > 0 else None
+            is_prefix = _match_type in {"symbol_prefix", "code_prefix"}
+            if is_prefix and before is not None and before.isalnum():
+                # e.g. "US$" matched as "$"
+                continue
+            if not is_prefix:
+                if amount_before is not None and amount_before.isalnum():
+                    # e.g. "P24" -> amount 24 preceded by P
+                    continue
+                if after is not None and after.isalnum():
+                    # e.g. "24 portal" matched as "24 p"
+                    continue
+
+            # Reject marketing magnitudes: "$1 billion", "€ 2 million", etc.
+            stripped_len = len(raw_amount.rstrip())
+            amount_end = amount_start + stripped_len
+            tail = text[amount_end:].lstrip()
+            if tail.lower().startswith(marketing_magnitudes):
+                continue
+
             currency = _currency_for_symbol(symbol_or_code) if group == "symbol" else symbol_or_code
             is_minor = False
             if group == "symbol" and symbol_or_code in MINOR_CURRENCY_SYMBOLS:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from decimal import Decimal
 from typing import Any
 
@@ -10,6 +11,7 @@ from .models import (
     CoverageSummary,
     FeeComponent,
     FeeCondition,
+    FeeEvidence,
     FeeRule,
     Market,
     PricingEntry,
@@ -105,6 +107,93 @@ _PAYMENT_METHOD_TOKENS: tuple[str, ...] = (
     "bank_transfer",
 )
 
+# Evidence vocabulary for positive fee classification and for rejecting common
+# false-positive sources.
+_POSITIVE_FEE_TERMS: tuple[str, ...] = (
+    "fee",
+    "fees",
+    "cost",
+    "costs",
+    "charge",
+    "charged",
+    "pricing",
+    "per transaction",
+    "per successful charge",
+    "per successful transaction",
+    "per authorization",
+    "per payout",
+    "per dispute",
+    "per invoice",
+    "per paid invoice",
+    "per month",
+    "monthly",
+    "per year",
+    "yearly",
+    "maximum fee",
+    "minimum fee",
+    "max fee",
+    "min fee",
+    "cap",
+    "capped",
+    "percentage plus fixed amount",
+    "processing fee",
+    "transaction fee",
+    "payment fee",
+)
+
+_MARKETING_TERMS: tuple[str, ...] = (
+    "billion",
+    "million",
+    "trillion",
+    "category leaders",
+    "customers",
+    "customer",
+    "process more than",
+    "process over",
+    "api calls",
+    "revenue",
+    "transaction volume",
+    "transaction-volume",
+    "ranking",
+    "rankings",
+    "100+",
+    "100 +",
+    "% of",
+    "percent of",
+    "percentage of",
+    "year",
+    "years",
+    "annual",
+    "annually",
+)
+
+_PROMOTIONAL_TERMS: tuple[str, ...] = (
+    "may qualify",
+    "temporarily reduced",
+    "temporarily lower",
+    "contact sales",
+    "contact us",
+    "custom quote",
+    "starting prices may apply",
+)
+
+_HARDWARE_PRICE_TERMS: tuple[str, ...] = (
+    "reader",
+    "readers",
+    "device",
+    "devices",
+    "purchase",
+    "purchased",
+    "hardware",
+    "terminal",
+    "tap to pay",
+    "price",
+    "one-time",
+)
+
+_PUBLICATION_CONFIDENCE_THRESHOLD = 0.7
+_MIN_HARDWARE_MAJOR_AMOUNT = Decimal("10.0")
+
 
 def _fixed_amount_minor(amount: str, currency: str) -> str | None:
     """Convert a major-unit amount to minor units for a currency."""
@@ -121,6 +210,170 @@ def _fixed_amount_minor(amount: str, currency: str) -> str | None:
 def _text_has(text: str, *terms: str) -> bool:
     lower = text.lower()
     return any(term in lower for term in terms)
+
+
+def _source_text_for_group(group: list[dict[str, Any]]) -> str:
+    """Combine all source texts and section headings for the group."""
+    parts: list[str] = []
+    for item in group:
+        entry = item["entry"]
+        parts.extend(entry.section_path)
+        parts.append(entry.source_text)
+    return " ".join(p for p in parts if p).lower()
+
+
+def _is_explicit_fee_phrase(text: str) -> bool:
+    """Return True when the text contains explicit fee-calculation language."""
+    return _text_has(text, *_POSITIVE_FEE_TERMS)
+
+
+def _is_marketing_prose(text: str) -> bool:
+    """Return True for statistics, volume claims, and other marketing copy."""
+    return _text_has(text, *_MARKETING_TERMS)
+
+
+def _is_promotional_language(text: str) -> bool:
+    """Return True for conditional or sales-led pricing language."""
+    return _text_has(text, *_PROMOTIONAL_TERMS)
+
+
+def _has_hardware_context(text: str) -> bool:
+    """Return True when the text describes a terminal/device purchase price."""
+    return _text_has(text, *_HARDWARE_PRICE_TERMS)
+
+
+def _is_terminal_hardware_price(
+    entry: PricingEntry,
+    product_id: str,
+    fee_components: list[FeeComponent],
+    unit: str | None,
+) -> bool:
+    """Detect terminal reader/device prices that should not be per-transaction fees."""
+    if product_id != "terminal" and entry.payment_method != "terminal":
+        return False
+    text = (" ".join(entry.section_path + [entry.source_text])).lower()
+    # A true terminal processing fee normally mentions a per-event unit.
+    explicit_processing_context = _text_has(
+        text,
+        "per successful",
+        "per transaction",
+        "per charge",
+        "per in-person",
+        "authorization fee",
+        "processing fee",
+        "transaction fee",
+        "fee",
+        "fees",
+    )
+    fixed_components = [c for c in fee_components if c.type in {"fixed_amount", "fixed_surcharge"}]
+    if not fixed_components:
+        return False
+    largest_fixed = max(
+        (Decimal(c.amount) for c in fixed_components if c.amount and c.currency),
+        default=Decimal("0"),
+    )
+    if largest_fixed < _MIN_HARDWARE_MAJOR_AMOUNT:
+        return False
+    if explicit_processing_context:
+        return False
+    return _has_hardware_context(text)
+
+
+def _is_amount_from_method_name(
+    entry: PricingEntry,
+    fee_components: list[FeeComponent],
+) -> bool:
+    """Detect amounts that were parsed out of product/payment-method names."""
+    text = entry.source_text
+    for comp in fee_components:
+        if comp.type in {"fixed_amount", "fixed_surcharge", "maximum_fee", "minimum_fee"} and comp.amount:
+            # If the amount text appears right after an alphabetic payment-method
+            # token (e.g. "P24" -> "24"), it is not a real fee amount.
+            # Use the original raw text if present; otherwise look for the amount.
+            raw = comp.source_text or text or ""
+            if raw and re.search(r"[a-z]\s*" + re.escape(comp.amount) + r"\b", raw, re.IGNORECASE):
+                return True
+    return False
+
+
+def _fee_evidence_for_group(
+    group: list[dict[str, Any]],
+    product_id: str,
+    fee_components: list[FeeComponent],
+    unit: str | None,
+) -> FeeEvidence:
+    """Evaluate the evidence behind a would-be calculable rule."""
+    base_entry = group[0]["entry"]
+    combined = _source_text_for_group(group)
+    entry_ids = [item["entry"].entry_id for item in group]
+    phrases = [item["entry"].source_text for item in group]
+
+    # 1. Promotional / conditional pricing is never a concrete fee.
+    if _is_promotional_language(combined):
+        return FeeEvidence(
+            type="promotional_language",
+            source_entry_ids=entry_ids,
+            phrases=phrases,
+            confidence=0.1,
+        )
+
+    # 2. Marketing prose with numbers is not a fee.
+    if _is_marketing_prose(combined):
+        return FeeEvidence(
+            type="marketing_prose",
+            source_entry_ids=entry_ids,
+            phrases=phrases,
+            confidence=0.0,
+        )
+
+    # 3. Terminal hardware purchase prices.
+    if _is_terminal_hardware_price(base_entry, product_id, fee_components, unit):
+        return FeeEvidence(
+            type="hardware_price",
+            source_entry_ids=entry_ids,
+            phrases=phrases,
+            confidence=0.0,
+        )
+
+    # 4. Amounts extracted from alphanumeric method/product names.
+    if _is_amount_from_method_name(base_entry, fee_components):
+        return FeeEvidence(
+            type="alphanumeric_method_name",
+            source_entry_ids=entry_ids,
+            phrases=phrases,
+            confidence=0.0,
+        )
+
+    # 5. A real fee needs explicit fee language, a trusted table heading with a
+    #    fee formula, or an unconditional per-event/per-period phrase.
+    if _is_explicit_fee_phrase(combined):
+        return FeeEvidence(
+            type="explicit_fee_phrase",
+            source_entry_ids=entry_ids,
+            phrases=phrases,
+            confidence=0.85,
+        )
+
+    # Trust a heading/section_path that already contains a percentage or amount
+    # and a payment method as a pricing-table value.
+    path_text = " ".join(p.lower() for p in base_entry.section_path if p)
+    if re.search(r"[0-9]\s*%|[0-9]\s*[€£$¥a-z$]", path_text) and re.search(
+        r"\b(" + "|".join(re.escape(m.replace("_", " ")) for m in _PAYMENT_METHOD_TOKENS) + r")\b",
+        path_text,
+    ):
+        return FeeEvidence(
+            type="pricing_table_value",
+            source_entry_ids=entry_ids,
+            phrases=phrases,
+            confidence=0.75,
+        )
+
+    return FeeEvidence(
+        type="insufficient",
+        source_entry_ids=entry_ids,
+        phrases=phrases,
+        confidence=0.0,
+    )
 
 
 def _infer_card_region(entry: PricingEntry, account_country: str | None = None) -> str | None:
@@ -603,6 +856,12 @@ def _empty_group_rule(
         variant_id = _infer_variant_id(base, product_id, account_country)
         conditions = _infer_conditions(base, product_id, variant_id, account_country)
         components = _build_components_for_entry(base, hint)
+        evidence = FeeEvidence(
+            type=status,
+            source_entry_ids=[base.entry_id],
+            phrases=[base.source_text],
+            confidence=0.7,
+        )
         rule = FeeRule(
             rule_id=stable_id(product_id, variant_id, *[f"{c.dimension}={c.value}" for c in conditions], base.entry_id),
             entry_id=base.entry_id,
@@ -623,6 +882,7 @@ def _empty_group_rule(
             source_url=base.source_url,
             classification_status=status,
             confidence=0.7,
+            fee_evidence=evidence,
         )
         return rule, None
     return None, base
@@ -736,29 +996,46 @@ def _classify_group(
         elif payment_method:
             unit = "per_transaction"
 
-    # Determine calculability and final status.
+    # Determine calculability and final status using positive fee evidence.
     calculable = _has_base_fee(base_entry) or any(
         c.type in {"percentage", "fixed_amount", "percentage_surcharge", "fixed_surcharge"} for c in fee_components
     )
+
+    fee_evidence = _fee_evidence_for_group(group, product_id, fee_components, unit)
+    evidence_positive = fee_evidence.type in {
+        "explicit_fee_phrase",
+        "pricing_table_value",
+        "structured_fee_field",
+    }
 
     if exactness == "custom" or (not calculable and exactness == "from"):
         classification_status = CUSTOM_PRICING
     elif exactness in {"included", "free"}:
         classification_status = INCLUDED if exactness == "included" else FREE
-    elif calculable:
+    elif calculable and evidence_positive:
         classification_status = CALCULABLE_RULE
     else:
+        classification_status = NON_CALCULABLE
+
+    # Evidence-driven downgrades override the numeric calculability decision.
+    if fee_evidence.type == "promotional_language":
+        classification_status = CUSTOM_PRICING
+    elif fee_evidence.type in {"marketing_prose", "hardware_price", "alphanumeric_method_name"}:
+        classification_status = INFORMATIONAL
+    elif fee_evidence.type == "insufficient" and classification_status == CALCULABLE_RULE:
         classification_status = NON_CALCULABLE
 
     # A rule must have a channel, unit, and behavior to be calculation-ready.
     if classification_status == CALCULABLE_RULE and (not channel or not unit or not behavior):
         classification_status = NON_CALCULABLE
 
-    confidence = 0.85
+    confidence = fee_evidence.confidence
+    if classification_status == CALCULABLE_RULE and (not channel or not unit or not behavior):
+        confidence = 0.6
     if classification_status != CALCULABLE_RULE:
         confidence = 0.0
-    elif not channel or not unit or not behavior:
-        confidence = 0.6
+    if classification_status == CALCULABLE_RULE and confidence < _PUBLICATION_CONFIDENCE_THRESHOLD:
+        classification_status = NON_CALCULABLE
 
     rule_id = stable_id(
         product_id,
@@ -817,6 +1094,7 @@ def _classify_group(
         confidence=confidence,
         classification_evidence=[f"product={product_id}", f"variant={variant_id}"]
         + [f"{c.dimension}={c.value}" for c in conditions],
+        fee_evidence=fee_evidence,
     )
 
     # Add reference notes for external fee components such as PayPal fees.

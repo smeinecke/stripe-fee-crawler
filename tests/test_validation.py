@@ -14,6 +14,7 @@ from stripe_fee_crawler.models import (
     CoreFees,
     FeeComponent,
     FeeCondition,
+    FeeEvidence,
     FeeRule,
     Market,
     MarketManifest,
@@ -157,7 +158,7 @@ def _valid_core_rule(**overrides: Any) -> CoreFeeRule:
         rule_id="r1",
         product_id="payments",
         variant_id="online_domestic_cards",
-        label="card_payment",
+        label="1.5% + €0.25",
         provider="stripe",
         account_country="DE",
         channel="online",
@@ -171,6 +172,8 @@ def _valid_core_rule(**overrides: Any) -> CoreFeeRule:
         exactness="exact",
         behavior="conditional",
         classification_status="calculable_rule",
+        confidence=0.85,
+        fee_evidence=FeeEvidence(type="explicit_fee_phrase", confidence=0.85),
         **overrides,
     )
 
@@ -243,6 +246,7 @@ def test_semantic_validation_fails_bad_currency_exponent() -> None:
         rule_id="r1",
         product_id="payments",
         variant_id="online_domestic_cards",
+        label="1.5% + ¥1",
         provider="stripe",
         account_country="DE",
         channel="online",
@@ -255,6 +259,8 @@ def test_semantic_validation_fails_bad_currency_exponent() -> None:
         exactness="exact",
         behavior="conditional",
         classification_status="calculable_rule",
+        confidence=0.85,
+        fee_evidence=FeeEvidence(type="explicit_fee_phrase", confidence=0.85),
     )
     core_fees = CoreFees(
         markets=[
