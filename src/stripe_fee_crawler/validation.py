@@ -145,12 +145,31 @@ def _validate_publication(output_dir: Path) -> list[str]:
         except Exception as exc:
             errors.append(f"{path.name}: cannot read market output: {exc}")
             continue
+        coverage = data.get("coverage_summary", {})
+        dropped = coverage.get("dropped_numeric_entries", 0)
+        if dropped:
+            errors.append(f"{path.name}: dropped {dropped} numeric source entries")
         rules = data.get("derived_rules", [])
-        if not rules:
-            continue
-        market_has_derived_rules = True
-        if not any(_is_calculable_status(r.get("classification_status", "")) for r in rules):
-            market_all_non_calculable.append(path.stem)
+        # Detect a silent first-value-wins or partial conflict situation:
+        # a selector may not simultaneously publish authoritative and conflict
+        # candidates.
+        identities: dict[tuple[str, str | None, Any], list[dict[str, Any]]] = {}
+        for r in rules:
+            identity = (r.get("product_id") or "", r.get("variant_id"), _condition_key_data(r.get("conditions", [])))
+            identities.setdefault(identity, []).append(r)
+        for identity, identity_rules in identities.items():
+            statuses = {r.get("classification_status") for r in identity_rules}
+            if "conflict" in statuses and statuses != {"conflict"}:
+                ids = [r.get("rule_id") for r in identity_rules]
+                errors.append(
+                    f"{path.name}: semantic identity {identity} has both authoritative and conflict rules: {ids}"
+                )
+
+        non_conflict = [r for r in rules if r.get("classification_status") != "conflict"]
+        if non_conflict:
+            market_has_derived_rules = True
+            if not any(_is_calculable_status(r.get("classification_status", "")) for r in non_conflict):
+                market_all_non_calculable.append(path.stem)
 
     if market_all_non_calculable:
         errors.append(f"All derived rules are non-calculable for markets: {', '.join(market_all_non_calculable)}")
@@ -196,6 +215,11 @@ def _validate_publication(output_dir: Path) -> list[str]:
         )
 
     return errors
+
+
+def _condition_key_data(conditions: list[dict[str, Any]]) -> tuple[tuple[str, str, str], ...]:
+    """Build a sorted condition key from raw JSON condition dictionaries."""
+    return tuple(sorted((str(c.get("dimension")), str(c.get("operator")), str(c.get("value"))) for c in conditions))
 
 
 def _validate_market_source_integrity(output_dir: Path) -> list[str]:

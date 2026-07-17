@@ -76,6 +76,8 @@ _PAYMENT_METHOD_TOKENS: tuple[str, ...] = (
     "sepa_bank_transfer",
     "ach_direct_debit",
     "bacs_direct_debit",
+    "pre_authorized_debit",
+    "pad",
     "bancontact",
     "bizum",
     "blik",
@@ -103,6 +105,7 @@ _PAYMENT_METHOD_TOKENS: tuple[str, ...] = (
     "konbini",
     "apple_pay",
     "google_pay",
+    "click_to_pay",
     "cash_app_pay",
     "cash_app_afterpay",
     "afterpay",
@@ -174,6 +177,7 @@ _MARKETING_TERMS: tuple[str, ...] = (
     "process more than",
     "process over",
     "api calls",
+    "api requests",
     "revenue",
     "transaction volume",
     "transaction-volume",
@@ -199,6 +203,10 @@ _MARKETING_TERMS: tuple[str, ...] = (
     "adoption",
     "increase conversion",
     "increase acceptance",
+    "return on investment",
+    "roi",
+    "uptime",
+    "historical uptime",
 )
 
 _PROMOTIONAL_TERMS: tuple[str, ...] = (
@@ -799,10 +807,14 @@ def _infer_product_id(entry: PricingEntry) -> str:
             return "terminal"
         return method
 
-    # No explicit payment method: infer from the section heading / fee category.
+    # No explicit payment method: infer from the section heading / fee category
+    # and the source text.  Add-on and non-payment headings can appear in the
+    # text itself (e.g. "... Managed Payments transaction" under a generic
+    # section), so the source text is included in the heuristic scan.
     path = " ".join(p.lower() for p in entry.section_path)
     category = (entry.fee_category or "").lower()
-    combined = path + " " + category
+    text = entry.source_text.lower()
+    combined = path + " " + category + " " + text
 
     if _text_has(combined, "smart dispute", "smart disputes"):
         return "smart_disputes"
@@ -839,7 +851,10 @@ def _infer_product_id(entry: PricingEntry) -> str:
 
     text = entry.source_text.lower()
     combined = path + " " + text
-    if "card" in combined or "payment" in combined:
+    # Generic payment processing is card-based; avoid treating generic
+    # "payment methods" headings as card payments when no card or explicit
+    # method token is present.
+    if "card" in combined or ("payment" in combined and not _text_has(combined, "payment methods", "payment method")):
         return "payments"
     if _text_has(combined, "ach"):
         return "ach_direct_debit"
@@ -1003,6 +1018,10 @@ def _infer_conditions(
         conditions.append(FeeCondition(dimension="settlement_timing", value="standard"))
     if "instant settlement" in text or "instant payout" in text:
         conditions.append(FeeCondition(dimension="settlement_timing", value="instant"))
+    if "two-day settlement" in text or "two day settlement" in text:
+        conditions.append(FeeCondition(dimension="settlement_timing", value="two_day"))
+    if "same-day settlement" in text or "same day settlement" in text:
+        conditions.append(FeeCondition(dimension="settlement_timing", value="same_day"))
 
     pricing_plan = _infer_pricing_plan(entry)
     if pricing_plan:
@@ -1060,6 +1079,11 @@ def _infer_conditions(
         conditions.append(FeeCondition(dimension="transaction_type", value="charge"))
     elif "per payout" in text or product_id == "instant_payouts":
         conditions.append(FeeCondition(dimension="transaction_type", value="payout"))
+    elif "bank account validation" in text:
+        conditions.append(FeeCondition(dimension="transaction_type", value="bank_account_validation"))
+
+    if "manually entered" in text or "manual entry" in text or "moto" in text:
+        conditions.append(FeeCondition(dimension="card_entry_mode", value="manual"))
 
     return conditions
 
@@ -1088,6 +1112,8 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
     ):
         return "per_attempt"
     if "per successful charge" in text or "per charge" in text:
+        return "per_charge"
+    if "per wire payment" in text or "per wire" in text:
         return "per_charge"
     if "per successful transaction" in text or "per transaction" in text:
         return "per_transaction"
@@ -1319,20 +1345,20 @@ def _build_components_for_entry(entry: PricingEntry, hint: str) -> list[FeeCompo
 
 def _empty_group_rule(
     group: list[dict[str, Any]], account_country: str | None
-) -> tuple[FeeRule | None, PricingEntry | None]:
+) -> tuple[FeeRule | None, list[PricingEntry]]:
     """Attempt to derive a rule even from non-fee or informational entries."""
     base = group[0]["entry"]
     parsed = parse_fee_value(base.source_text)
     if not _has_base_fee(base, parsed):
         hint = _entry_component_hint(base)
         if hint == "custom":
-            return None, base.model_copy(update={"classification_status": CUSTOM_PRICING})
+            return None, [base.model_copy(update={"classification_status": CUSTOM_PRICING})]
         if hint == "included":
             status = INCLUDED
         elif hint == "free":
             status = FREE
         else:
-            return None, base
+            return None, [base]
         product_id = _infer_product_id(base)
         variant_id = _infer_variant_id(base, product_id, account_country)
         conditions = _infer_conditions(base, product_id, variant_id, account_country)
@@ -1365,8 +1391,8 @@ def _empty_group_rule(
             confidence=0.7,
             fee_evidence=evidence,
         )
-        return rule, None
-    return None, base
+        return rule, []
+    return None, [base]
 
 
 def _base_conditions(item: dict[str, Any], account_country: str | None) -> list[FeeCondition]:
@@ -1400,7 +1426,7 @@ def _base_conditions(item: dict[str, Any], account_country: str | None) -> list[
 
 def _classify_group(
     group: list[dict[str, Any]], account_country: str | None
-) -> tuple[FeeRule | None, PricingEntry | None]:
+) -> tuple[FeeRule | None, list[PricingEntry]]:
     """Classify a group of related entries into one FeeRule."""
     base_item = group[0]
     base_entry = base_item["entry"]
@@ -1617,10 +1643,28 @@ def _classify_group(
         rule = rule.model_copy(update={"additional_fees": ["PayPal fees (external; not included in Stripe rate)"]})
 
     if classification_status == CUSTOM_PRICING:
-        return None, base_entry.model_copy(update={"classification_status": CUSTOM_PRICING})
+        return None, [
+            item["entry"].model_copy(
+                update={
+                    "classification_status": CUSTOM_PRICING,
+                    "confidence": 0.0,
+                    "classification_evidence": ["group classified as custom pricing"],
+                }
+            )
+            for item in group
+        ]
     if classification_status in {CALCULABLE_RULE, INCLUDED, FREE, NON_CALCULABLE, REFERENCE_ONLY}:
-        return rule, None
-    return None, base_entry
+        return rule, []
+    return None, [
+        item["entry"].model_copy(
+            update={
+                "classification_status": classification_status,
+                "confidence": 0.0,
+                "classification_evidence": [f"group classification_status={classification_status}"],
+            }
+        )
+        for item in group
+    ]
 
 
 def _enrich_entries(entries: list[PricingEntry], account_country: str | None) -> list[dict[str, Any]]:
@@ -1649,6 +1693,12 @@ def _enrich_entries(entries: list[PricingEntry], account_country: str | None) ->
         is_modifier = _is_modifier_entry(entry)
         if previous and tuple(previous["entry"].section_path) == tuple(entry.section_path):
             if is_modifier and product_id == "payments" and previous["product_id"] not in {"payments", "terminal"}:
+                product_id = previous["product_id"]
+            if (
+                is_modifier
+                and product_id == "unspecified"
+                and previous["product_id"] not in {"unspecified", "payments", "terminal"}
+            ):
                 product_id = previous["product_id"]
             if product_id == previous["product_id"] or is_modifier:
                 if not payment_method and previous["payment_method"]:
@@ -1696,7 +1746,14 @@ def _group_entries(entries: list[PricingEntry], account_country: str | None) -> 
         attached = False
         for group in reversed(groups):
             last = group[-1]
-            if last["section_key"] != item["section_key"]:
+
+            # Modifiers may appear in their own row-level heading (e.g. "$5.00 cap"
+            # under "Payment methods/ACH Direct Debit ...").  Compare the parent
+            # section path so the cap can attach to the matching base row.
+            def _parent_key(key: tuple[str, ...]) -> tuple[str, ...]:
+                return key[:-1] if len(key) > 1 else key
+
+            if _parent_key(last["section_key"]) != _parent_key(item["section_key"]):
                 continue
             if last["product_id"] != item["product_id"]:
                 continue
@@ -1736,31 +1793,333 @@ def _condition_key(conditions: list[FeeCondition]) -> tuple[tuple[str, str, Any]
     return tuple(sorted((c.dimension, c.operator, str(c.value)) for c in conditions))
 
 
+def _fee_signature(rule: FeeRule) -> tuple[Any, ...]:
+    """Return a normalized signature covering the full fee definition.
+
+    The signature includes every fee component (percentage, fixed amount,
+    surcharges, caps, floors), the unit, exactness, behavior and the pricing
+    plan so that two rules with the same selector but different fee shapes are
+    not silently collapsed.
+    """
+    components = sorted(
+        rule.fee_components,
+        key=lambda c: (
+            c.type or "",
+            c.value or "",
+            c.amount or "",
+            c.currency or "",
+            c.basis_points or "",
+            c.operator or "",
+            c.minor_amount or "",
+        ),
+    )
+    comp_tuples = tuple(
+        (c.type, c.value, c.amount, c.currency, c.basis_points, c.operator, c.minor_amount) for c in components
+    )
+    pricing_plan = next((c.value for c in rule.conditions if c.dimension == "pricing_plan"), None)
+    return (
+        comp_tuples,
+        rule.unit,
+        rule.exactness,
+        rule.behavior,
+        pricing_plan,
+    )
+
+
+def _merge_rules(rules: list[FeeRule]) -> FeeRule:
+    """Merge rules that share a selector and fee signature into one rule.
+
+    Provenance (entry IDs, source text, fragments and evidence) is combined;
+    the fee definition itself is taken from the first rule because the fee
+    signature is identical.
+    """
+    base = rules[0]
+
+    # Contributing entry IDs in first-seen order.
+    seen_entry_ids: set[str] = set()
+    contributing_entry_ids: list[str] = []
+    for r in rules:
+        for eid in r.contributing_entry_ids:
+            if eid not in seen_entry_ids:
+                seen_entry_ids.add(eid)
+                contributing_entry_ids.append(eid)
+
+    # Source texts and evidence phrases, deduplicated.
+    source_texts = _ordered_unique(_dedup_repeated_phrases(t) for r in rules for t in r.source_texts if t)
+    label = base.label
+    source_text = base.source_text or label
+
+    # Use the strongest evidence as the base and merge provenance from all rules.
+    evidence_rules = [r for r in rules if r.fee_evidence is not None]
+    best_evidence_rule = (
+        max(
+            evidence_rules,
+            key=lambda r: (
+                {"calculable_rule": 3, "classified": 2, "non_calculable": 1}.get(r.classification_status, 0),
+                r.confidence,
+            ),
+        )
+        if evidence_rules
+        else base
+    )
+    fee_evidence = best_evidence_rule.fee_evidence
+    if fee_evidence is not None:
+        evidence_phrases = _ordered_unique(
+            _dedup_repeated_phrases(p)
+            for r in evidence_rules
+            if r.fee_evidence is not None
+            for p in r.fee_evidence.phrases
+            if p
+        )
+        evidence_entry_ids = _ordered_unique(
+            eid for r in evidence_rules if r.fee_evidence is not None for eid in r.fee_evidence.source_entry_ids
+        )
+        fee_evidence = fee_evidence.model_copy(
+            update={"phrases": evidence_phrases, "source_entry_ids": evidence_entry_ids}
+        )
+
+    # Source fragments by text.
+    fragment_by_text: dict[str, str | None] = {}
+    for r in rules:
+        for frag in r.source_fragments:
+            text = frag.get("text")
+            if text and text not in fragment_by_text:
+                fragment_by_text[text] = frag.get("entry_id")
+    source_fragments = [{"entry_id": entry_id, "text": text} for text, entry_id in fragment_by_text.items()]
+
+    # Fee components are identical by signature; sort for deterministic output.
+    fee_components = sorted(
+        base.fee_components,
+        key=lambda c: (
+            c.type or "",
+            c.value or "",
+            c.amount or "",
+            c.currency or "",
+            c.basis_points or "",
+            c.operator or "",
+            c.minor_amount or "",
+        ),
+    )
+
+    # Preserve the most concrete classification state and highest confidence.
+    status_priority = {"calculable_rule": 3, "classified": 2, "non_calculable": 1}
+    classification_status = max(
+        rules, key=lambda r: status_priority.get(r.classification_status, 0)
+    ).classification_status
+    confidence = max(r.confidence for r in rules)
+
+    # Recompute the rule id from the stable selector + fee signature.
+    rule_id = stable_id(
+        base.product_id or "",
+        base.variant_id or "",
+        *[f"{c.dimension}={c.value}" for c in sorted(base.conditions, key=lambda x: x.dimension)],
+        str(_fee_signature(base)),
+    )
+
+    classification_evidence = _ordered_unique(item for r in rules for item in r.classification_evidence if item)
+
+    return base.model_copy(
+        update={
+            "rule_id": rule_id,
+            "entry_id": base.entry_id,
+            "contributing_entry_ids": contributing_entry_ids,
+            "label": label,
+            "source_text": source_text,
+            "source_texts": source_texts,
+            "source_fragments": source_fragments,
+            "fee_components": fee_components,
+            "classification_status": classification_status,
+            "confidence": confidence,
+            "classification_evidence": classification_evidence,
+            "fee_evidence": fee_evidence,
+        }
+    )
+
+
+def _is_fee_candidate(rule: FeeRule) -> bool:
+    """Return True when a rule represents a concrete fee candidate.
+
+    Only calculable, classified and genuine (numeric) non-calculable rules are
+    fee candidates.  Informational, custom-pricing, ignored or unclassified
+    statuses may carry numbers but are not fee definitions and must not force a
+    conflict with real fee rules.
+    """
+    if rule.classification_status in {CALCULABLE_RULE, "classified"}:
+        return True
+    if rule.classification_status != NON_CALCULABLE:
+        return False
+    return any(
+        c.type
+        in {"percentage", "fixed_amount", "percentage_surcharge", "fixed_surcharge", "minimum_fee", "maximum_fee"}
+        and (c.value is not None or c.amount is not None)
+        for c in rule.fee_components
+    )
+
+
+def _merge_rule_provenance(base: FeeRule, other: FeeRule) -> FeeRule:
+    """Merge source provenance from ``other`` into ``base`` without changing fees."""
+    seen_ids: set[str] = set(base.contributing_entry_ids)
+    contributing_entry_ids = list(base.contributing_entry_ids)
+    for eid in other.contributing_entry_ids:
+        if eid not in seen_ids:
+            seen_ids.add(eid)
+            contributing_entry_ids.append(eid)
+
+    source_texts = _ordered_unique(_dedup_repeated_phrases(t) for t in base.source_texts + other.source_texts if t)
+
+    fragments: dict[str, str | None] = {}
+    for frag in base.source_fragments + other.source_fragments:
+        text = frag.get("text")
+        if text and text not in fragments:
+            fragments[text] = frag.get("entry_id")
+    source_fragments = [{"entry_id": entry_id, "text": text} for text, entry_id in fragments.items()]
+
+    fee_evidence = base.fee_evidence
+    if fee_evidence is not None and other.fee_evidence is not None:
+        phrases = _ordered_unique(
+            _dedup_repeated_phrases(p) for p in fee_evidence.phrases + other.fee_evidence.phrases if p
+        )
+        entry_ids = _ordered_unique(eid for eid in fee_evidence.source_entry_ids + other.fee_evidence.source_entry_ids)
+        fee_evidence = fee_evidence.model_copy(update={"phrases": phrases, "source_entry_ids": entry_ids})
+    elif other.fee_evidence is not None:
+        fee_evidence = other.fee_evidence
+
+    classification_evidence = _ordered_unique(base.classification_evidence + other.classification_evidence)
+
+    return base.model_copy(
+        update={
+            "contributing_entry_ids": contributing_entry_ids,
+            "source_texts": source_texts,
+            "source_fragments": source_fragments,
+            "classification_evidence": classification_evidence,
+            "fee_evidence": fee_evidence,
+        }
+    )
+
+
+def _as_conflict_rule(rule: FeeRule) -> FeeRule:
+    """Return a copy of ``rule`` marked as a conflict diagnostic."""
+    return rule.model_copy(
+        update={
+            "classification_status": "conflict",
+            "confidence": 0.0,
+            "classification_evidence": list(rule.classification_evidence)
+            + ["conflict: semantic identity with differing fee signature"],
+        }
+    )
+
+
 def _deduplicate_rules(rules: list[FeeRule]) -> list[FeeRule]:
-    """Remove later rules that duplicate an earlier semantic identity."""
-    seen: dict[tuple[str, str | None, Any], FeeRule] = {}
-    result: list[FeeRule] = []
+    """Resolve rules with the same semantic identity.
+
+    Rules that share product_id + variant_id + conditions and also share the
+    same fee signature are merged.  Rules that share the selector but differ in
+    fee signature are kept as ``conflict`` candidates so nothing is silently
+    discarded.
+    """
+    # order preserves first-seen selector order; buckets map a selector to a
+    # list of rule groups, each group sharing one fee signature.
+    order: list[tuple[str, str | None, Any]] = []
+    buckets: dict[
+        tuple[str, str | None, Any],
+        list[list[FeeRule]],
+    ] = {}
+
     for rule in rules:
-        key = (rule.product_id or "", rule.variant_id, _condition_key(rule.conditions))
-        if key in seen:
-            # Prefer the more complete/calculable duplicate.
-            existing = seen[key]
-            if rule.classification_status == CALCULABLE_RULE and existing.classification_status != CALCULABLE_RULE:
-                seen[key] = rule
-                idx = result.index(existing)
-                result[idx] = rule
+        selector = (rule.product_id or "", rule.variant_id, _condition_key(rule.conditions))
+        sig = _fee_signature(rule)
+        if selector not in buckets:
+            buckets[selector] = []
+            order.append(selector)
+        groups = buckets[selector]
+        for group in groups:
+            if _fee_signature(group[0]) == sig:
+                group.append(rule)
+                break
+        else:
+            groups.append([rule])
+
+    result: list[FeeRule] = []
+    for selector in order:
+        sig_groups = buckets[selector]
+        # Merge within each signature group first.
+        merged_groups = [_merge_rules(g) for g in sig_groups]
+
+        # Rules for an unrecognized product with multiple conflicting fee
+        # shapes are informational by definition.  Collapse those groups into
+        # a single informational diagnostic so unrelated marketing numbers do
+        # not create spurious conflicts.  A lone unspecified group keeps its
+        # original non-calculable status.
+        if selector[0] == "unspecified" and len(merged_groups) > 1:
+            final = merged_groups[0]
+            for other in merged_groups[1:]:
+                final = _merge_rule_provenance(final, other)
+            final = final.model_copy(
+                update={
+                    "rule_id": stable_id(
+                        selector[0] or "",
+                        selector[1] or "",
+                        *[f"{c.dimension}={c.value}" for c in sorted(final.conditions, key=lambda x: x.dimension)],
+                        "informational",
+                    ),
+                    "classification_status": "informational",
+                    "confidence": 0.0,
+                    "fee_components": [],
+                    "percentage": None,
+                    "basis_points": None,
+                    "fixed_amount": None,
+                    "fixed_amount_minor": None,
+                    "fixed_currency": None,
+                    "minimum_amount": None,
+                    "maximum_amount": None,
+                    "unit": "informational",
+                    "behavior": "informational",
+                }
+            )
+            result.append(final)
             continue
-        seen[key] = rule
-        result.append(rule)
+
+        fee_candidates = [r for r in merged_groups if _is_fee_candidate(r)]
+        non_fee_groups = [r for r in merged_groups if not _is_fee_candidate(r)]
+
+        if len(fee_candidates) == 1:
+            # One clear fee: attach non-fee fragments to it for provenance.
+            final = fee_candidates[0]
+            for ng in non_fee_groups:
+                final = _merge_rule_provenance(final, ng)
+            result.append(final)
+        elif len(fee_candidates) > 1:
+            # Multiple real fee definitions for the same selector: publish none
+            # as authoritative and keep every candidate as a conflict.
+            for r in fee_candidates:
+                result.append(_as_conflict_rule(r))
+            for r in non_fee_groups:
+                result.append(_as_conflict_rule(r))
+        else:
+            # No real fee candidate; emit the non-fee groups.  Merge them by
+            # provenance so duplicate identities do not leak into the output.
+            if non_fee_groups:
+                final = non_fee_groups[0]
+                for ng in non_fee_groups[1:]:
+                    final = _merge_rule_provenance(final, ng)
+                result.append(final)
     return result
 
 
 def _derive_status(rules: list[FeeRule], unclassified: list[PricingEntry]) -> str:
-    if not rules:
+    authoritative = [r for r in rules if r.classification_status != "conflict"]
+    if not rules and not unclassified:
         return "unclassified"
+    if not authoritative:
+        return "partial"
     if not unclassified:
         return "complete"
     return "partial"
+
+
+def _numeric_source_entries(entries: list[PricingEntry]) -> list[PricingEntry]:
+    """Return entries that carry a numeric fee value."""
+    return [e for e in entries if _has_base_fee(e)]
 
 
 def _coverage_summary(
@@ -1770,9 +2129,32 @@ def _coverage_summary(
 ) -> CoverageSummary:
     summary = CoverageSummary()
     summary = summary.model_copy(update={"source_entries": len(entries)})
+
+    numeric_entries = _numeric_source_entries(entries)
+    referenced_ids: set[str] = set()
+    for rule in rules:
+        for eid in rule.contributing_entry_ids:
+            referenced_ids.add(eid)
+    for entry in unclassified:
+        referenced_ids.add(entry.entry_id)
+    referenced_numeric = [e for e in numeric_entries if e.entry_id in referenced_ids]
+    dropped_numeric = len(numeric_entries) - len(referenced_numeric)
+
+    summary = summary.model_copy(
+        update={
+            "numeric_source_entries": len(numeric_entries),
+            "referenced_numeric_entries": len(referenced_numeric),
+            "dropped_numeric_entries": dropped_numeric,
+        }
+    )
+
     for rule in rules:
         if rule.classification_status == CALCULABLE_RULE:
             summary = summary.model_copy(update={"calculable_rules": summary.calculable_rules + 1})
+        elif rule.classification_status == "conflict":
+            summary = summary.model_copy(
+                update={"conflicting_rule_identities": summary.conflicting_rule_identities + 1}
+            )
         else:
             summary = summary.model_copy(update={"non_calculable_rules": summary.non_calculable_rules + 1})
     for entry in unclassified:
@@ -1803,16 +2185,16 @@ def _calculator_coverage_status(
     rules: list[FeeRule],
     unclassified: list[PricingEntry],
 ) -> str:
-    if not rules:
+    authoritative = [r for r in rules if r.classification_status not in {"conflict"}]
+    if not authoritative:
+        if any(r.classification_status == "conflict" for r in rules) or unclassified:
+            return "partial"
         return "unclassified"
-    if not unclassified:
-        return "complete"
-    # If all remaining unclassified entries have no numeric fee value, the
-    # market is still covered for fee-calculation purposes.
+    # If any remaining unclassified entry has a numeric fee value, coverage is partial.
     numeric_unclassified = [e for e in unclassified if _has_base_fee(e)]
-    if not numeric_unclassified:
-        return "complete"
-    return "partial"
+    if numeric_unclassified:
+        return "partial"
+    return "complete"
 
 
 def _account_country_from_url(url: str) -> str | None:
@@ -1840,10 +2222,10 @@ def classify_entries(
 
     groups = _group_entries(entries, account_country)
     for group in groups:
-        rule, leftover = _classify_group(group, account_country)
+        rule, leftovers = _classify_group(group, account_country)
         if rule:
             rules.append(rule)
-        if leftover:
+        for leftover in leftovers:
             status = leftover.classification_status or UNCLASSIFIED_CANDIDATE
             if status not in {
                 CUSTOM_PRICING,

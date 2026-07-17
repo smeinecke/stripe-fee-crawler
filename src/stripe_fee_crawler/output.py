@@ -215,7 +215,7 @@ class OutputPublisher:
         for output in outputs:
             country = output.market.account_country
             for rule in output.derived_rules:
-                if not rule.payment_method:
+                if rule.classification_status == "conflict" or not rule.payment_method:
                     continue
                 method_id = normalize_method_name(rule.payment_method)
                 if method_id not in methods_by_id:

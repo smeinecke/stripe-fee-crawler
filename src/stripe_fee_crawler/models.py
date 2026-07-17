@@ -474,6 +474,9 @@ class CoverageSummary(BaseModel):
     source_entries: int = 0
     calculable_rules: int = 0
     non_calculable_rules: int = 0
+    numeric_source_entries: int = 0
+    referenced_numeric_entries: int = 0
+    dropped_numeric_entries: int = 0
     numeric_fee_candidates: int = 0
     unclassified_fee_candidates: int = 0
     ambiguous_entries: int = 0
