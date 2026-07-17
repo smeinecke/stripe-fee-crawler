@@ -1,6 +1,6 @@
 # Makefile for stripe-fee-crawler
 
-.PHONY: all format check validate test test-unit test-live help
+.PHONY: all format check validate test test-unit test-live regenerate regenerate-strict help
 
 all: validate test-unit
 
@@ -34,6 +34,12 @@ test-unit:
 test-live:
 	uv run pytest tests/ -m live
 
+regenerate:
+	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20
+
+regenerate-strict:
+	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --fail-on-regression
+
 validate: format check pyright bandit
 	@echo "Validation passed."
 
@@ -50,5 +56,7 @@ help:
 	@echo "  test          - Run all tests"
 	@echo "  test-unit     - Run unit tests (no live network)"
 	@echo "  test-live     - Run live integration tests"
+	@echo "  regenerate    - Regenerate all market data"
+	@echo "  regenerate-strict - Regenerate all market data and fail on regression"
 	@echo "  validate      - Run all validation checks"
 	@echo "  help          - Show this help message"
