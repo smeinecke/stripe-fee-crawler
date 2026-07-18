@@ -56,19 +56,36 @@ def _load_fixture(path: str | None) -> str | None:
         return None
 
 
-def _crawler_revision() -> str | None:
-    """Return the current crawler Git revision, or None if not available."""
-    try:
-        result = subprocess.run(  # nosec
-            ["git", "rev-parse", "HEAD"],
-            cwd=Path(__file__).resolve().parent,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        return result.stdout.strip() or None
-    except Exception:
-        return None
+def _crawler_revision(crawler_dir: Path | None = None) -> str | None:
+    """Return the current crawler Git revision, or None if not available.
+
+    Prefers the supplied ``crawler_dir`` (the crawler submodule checkout in the
+    data repository) and falls back to the crawler source checkout root adjacent
+    to this file.
+    """
+    candidates: list[Path] = []
+    if crawler_dir is not None:
+        candidates.append(crawler_dir)
+    # Source layout: .../crawler/src/stripe_fee_crawler/crawler.py
+    candidates.append(Path(__file__).resolve().parents[3])
+
+    for candidate in candidates:
+        if not candidate.exists():
+            continue
+        try:
+            result = subprocess.run(  # nosec
+                ["git", "rev-parse", "HEAD"],
+                cwd=candidate,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            rev = result.stdout.strip()
+            if rev:
+                return rev
+        except Exception:
+            continue
+    return None
 
 
 class StripeCrawler:
@@ -325,7 +342,8 @@ class StripeCrawler:
                 if o.transient_failure
             ]
 
-            crawler_revision = _crawler_revision()
+            crawler_dir = Path(output_dir) / "crawler"
+            crawler_revision = _crawler_revision(crawler_dir if crawler_dir.exists() else None)
             _, staging = publisher.publish(
                 outputs,
                 discovered_markets,
