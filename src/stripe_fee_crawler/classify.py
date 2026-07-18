@@ -115,9 +115,23 @@ _PAYMENT_METHOD_TOKENS: tuple[str, ...] = (
     "sunbit",
     "tap_to_pay",
     "link",
+    "paypay",
     "card",
     "terminal",
     "bank_transfer",
+)
+
+_CARD_NETWORK_TOKENS: tuple[str, ...] = (
+    "mastercard",
+    "visa",
+    "american express",
+    "american_express",
+    "amex",
+    "discover",
+    "jcb",
+    "diners",
+    "diners club",
+    "unionpay",
 )
 
 # Evidence vocabulary for positive fee classification and for rejecting common
@@ -136,15 +150,35 @@ _POSITIVE_FEE_TERMS: tuple[str, ...] = (
     "costs",
     "charge",
     "charged",
+    "starting fee",
+    "platform fee",
+    "uplift",
     "pricing",
     "per transaction",
     "per successful charge",
     "per successful transaction",
     "per authorization",
+    "per authorisation",
     "per payout",
+    "per payout paid out",
     "per dispute",
+    "per dispute payment",
+    "per resolution",
+    "per block",
+    "per lookup",
+    "per deflection",
     "per invoice",
     "per paid invoice",
+    "per authorised",
+    "per authorized",
+    "per refund",
+    "for refunds",
+    "per verification",
+    "per charge",
+    "per screened transaction",
+    "per connected account",
+    "per active user",
+    "per user",
     "per month",
     "monthly",
     "per year",
@@ -159,10 +193,15 @@ _POSITIVE_FEE_TERMS: tuple[str, ...] = (
     "processing fee",
     "transaction fee",
     "payment fee",
+    "billing volume",
+    "of billing volume",
     "currency conversion",
     "foreign exchange",
     "for international",
     "for domestic",
+    "for cards",
+    "for uk cards",
+    "payment methods",
     "cross-border",
     "cross border",
 )
@@ -219,6 +258,7 @@ _PROMOTIONAL_TERMS: tuple[str, ...] = (
     "starting prices may apply",
     "waive",
     "waived",
+    "try for free",
 )
 
 # Phrases that indicate a percentage is a market/adoption statistic, not a fee.
@@ -236,6 +276,13 @@ _MARKET_SHARE_STATISTICS: tuple[str, ...] = (
     "adoption",
     "increase conversion",
     "increase acceptance",
+    "uptime",
+    "historical uptime",
+    "api requests",
+    "api calls",
+    "billion",
+    "million",
+    "trillion",
 )
 
 _HARDWARE_PRICE_TERMS: tuple[str, ...] = (
@@ -412,6 +459,18 @@ def _fee_evidence_for_group(
     """Evaluate the evidence behind a would-be calculable rule."""
     base_entry = group[0]["entry"]
     combined = _source_text_for_group(group)
+    # For price rows split from a surrounding cell, the noun after "per" or
+    # the fee phrase may live in the surrounding evidence. Include it when the
+    # source text itself is only an amount or ends with a dangling "per".
+    text_for_evidence = combined
+    if base_entry.source_text.rstrip().lower().endswith(" per"):
+        per_noun = _per_completion_noun(base_entry)
+        if per_noun:
+            text_for_evidence = f"{combined} per {per_noun}"
+        else:
+            text_for_evidence = f"{combined} {base_entry.source_evidence or ''}".strip()
+    elif not re.search(r"[a-z]{3,}", base_entry.source_text.lower()):
+        text_for_evidence = f"{combined} {base_entry.source_evidence or ''}".strip()
     entry_ids = [item["entry"].entry_id for item in group]
     raw_phrases = [
         item["entry"].source_text
@@ -495,7 +554,7 @@ def _fee_evidence_for_group(
 
     # 6. A real fee needs explicit fee language, a trusted table heading with a
     #    fee formula, or an unconditional per-event/per-period phrase.
-    if _is_explicit_fee_phrase(combined):
+    if _is_explicit_fee_phrase(text_for_evidence):
         return FeeEvidence(
             type="explicit_fee_phrase",
             source_entry_ids=entry_ids,
@@ -503,13 +562,21 @@ def _fee_evidence_for_group(
             confidence=0.85,
         )
 
-    # Trust a heading/section_path that already contains a percentage or amount
-    # and a payment method as a pricing-table value.
-    path_text = " ".join(p.lower() for p in base_entry.section_path if p)
-    if re.search(r"[0-9]\s*%|[0-9]\s*[€£$¥a-z$]", path_text) and re.search(
-        r"\b(" + "|".join(re.escape(m.replace("_", " ")) for m in _PAYMENT_METHOD_TOKENS) + r")\b",
-        path_text,
-    ):
+    # Trust a heading/section_path or the source text itself when it already
+    # contains a percentage or amount next to a known payment method token.
+    amount_patterns = r"(?:\d\s*%|[A-Za-z]?[€£$¥₹₩]\s*\d|\d\s*[€£$¥₹₩])"
+    method_pattern_tokens = sorted(
+        set(_PAYMENT_METHOD_TOKENS) | set(_CARD_NETWORK_TOKENS), key=len, reverse=True
+    )
+    method_pattern = r"\b(" + "|".join(re.escape(m.replace("_", " ")) for m in method_pattern_tokens) + r")\b"
+    text_or_path = (
+        " ".join(p.lower() for p in base_entry.section_path if p)
+        + " "
+        + base_entry.source_text.lower()
+        + " "
+        + (base_entry.source_evidence or "").lower()
+    ).strip()
+    if re.search(amount_patterns, text_or_path) and re.search(method_pattern, text_or_path):
         return FeeEvidence(
             type="pricing_table_value",
             source_entry_ids=entry_ids,
@@ -730,21 +797,47 @@ def _infer_contract_length(text: str) -> str | None:
 
 def _infer_integration_type(entry: PricingEntry) -> str | None:
     """Distinguish Stripe Tax no-code vs API integration."""
-    lower = (entry.source_text + " " + (entry.source_evidence or "")).lower()
-    # API integration explicitly mentions Stripe payment APIs or API integration.
-    if "api integration" in lower or "payment apis" in lower:
-        return "api"
-    # No-code integration covers Billing, Checkout, Invoicing, Payment Links.
-    if any(
-        phrase in lower
-        for phrase in (
-            "no-code integration",
-            "no code integration",
-            "billing, checkout, invoicing, and payment links",
-            "taxes calculated and collected",
-        )
-    ):
+    text = entry.source_text.lower()
+    evidence = (entry.source_evidence or "").lower()
+    if "no-code" in text or "no code" in text:
         return "no_code"
+    if "api integration" in text or "payment apis" in text:
+        return "api"
+
+    # Stripe Tax cells contain multiple price rows (no-code, API, API overage).
+    # Locate the price within the surrounding evidence and look up for the
+    # nearest integration heading; if the price is not present in the evidence,
+    # the entry belongs to the first integration section described there.
+    price_match = re.search(r"\d+(?:\.\d+)?", entry.source_text)
+    price_needle = price_match.group(0) if price_match else None
+    if evidence:
+        lines = evidence.splitlines()
+        price_line = -1
+        if price_needle:
+            for i, line in enumerate(lines):
+                if price_needle in line:
+                    price_line = i
+                    break
+        if price_line >= 0:
+            for i in range(price_line, -1, -1):
+                line_l = lines[i].lower()
+                if "api integration" in line_l or "payment apis" in line_l:
+                    return "api"
+                if "no-code integration" in line_l or "no code integration" in line_l:
+                    return "no_code"
+        # Price not in evidence, or no heading above it: use the first explicit
+        # integration marker in the cell.
+        for line in lines:
+            line_l = line.lower()
+            if "api integration" in line_l or "payment apis" in line_l:
+                return "api"
+            if (
+                "no-code integration" in line_l
+                or "no code integration" in line_l
+                or "billing, checkout, invoicing, and payment links" in line_l
+                or "taxes calculated and collected" in line_l
+            ):
+                return "no_code"
     return None
 
 
@@ -753,7 +846,8 @@ def _nearest_heading_line(entry: PricingEntry) -> str | None:
 
     Many Stripe tables emit the price as a separate text node and put the
     feature name (e.g. "Visa resolution") in the surrounding container.  We
-    look for the first short, non-fee line in ``source_evidence``.
+    look for the line immediately before the first price-containing line
+    that is a short, non-price label.
     """
     evidence = entry.source_evidence or ""
     if not evidence:
@@ -763,30 +857,75 @@ def _nearest_heading_line(entry: PricingEntry) -> str | None:
     if not first_number_match:
         return None
     needle = first_number_match.group(0)
-    # Locate the occurrence of the number in the evidence that is closest to
-    # the start but not in the first line if that line is the price itself.
-    best_pos: int | None = None
-    for match in re.finditer(re.escape(needle), evidence):
-        pos = match.start()
-        line_start = evidence.rfind("\n", 0, pos) + 1
-        line = evidence[line_start:pos].strip().lower()
-        if line and not _looks_like_price_line(line):
-            best_pos = pos
-            break
-        if best_pos is None:
-            best_pos = pos
-    if best_pos is None:
-        best_pos = 0
-    # Scan backwards from the matched number for a heading line.
-    lines = evidence[:best_pos].splitlines()
-    for line in reversed(lines):
-        line = line.strip()
-        if not line or _looks_like_price_line(line.lower()):
+    lines = evidence.splitlines()
+    heading: str | None = None
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
             continue
-        # Headings are short labels, not full sentences.
-        if len(line.split()) <= 8:
-            return line
+        if needle in stripped and _looks_like_price_line(stripped.lower()):
+            return heading
+        if not _looks_like_price_line(stripped.lower()) and len(stripped.split()) <= 8:
+            heading = stripped
+    return heading
+
+
+_Per_UNIT_NOUNS: frozenset[str] = frozenset(
+    {
+        "resolution",
+        "block",
+        "lookup",
+        "lookups",
+        "deflection",
+        "dispute",
+        "refund",
+        "transaction",
+        "charge",
+        "payout",
+        "account",
+        "user",
+        "invoice",
+        "verification",
+    }
+)
+
+
+def _per_completion_noun(entry: PricingEntry) -> str | None:
+    """Return a unit noun that completes a dangling 'per' in the source text."""
+    source = entry.source_text.lower().rstrip()
+    if not source.endswith(" per"):
+        return None
+    heading = _nearest_heading_line(entry)
+    if not heading:
+        return None
+    words = heading.lower().split()
+    # Prefer the last word of the heading (e.g. "Visa resolution" -> "resolution").
+    for word in reversed(words):
+        clean = re.sub(r"[^a-z0-9]", "", word)
+        if clean in _Per_UNIT_NOUNS:
+            return clean
     return None
+
+
+def _is_unsupported_multi_per_shape(entry: PricingEntry, unit: str | None) -> bool:
+    """Detect fee shapes with stacked per-unit dimensions that cannot be modelled."""
+    text = entry.source_text.lower()
+    # Capture up to three words after each "per" to distinguish repeated units
+    # ("per successful charge ... per successful charge") from stacked
+    # dimensions ("per institution per account holder per month").
+    per_phrases = re.findall(
+        r"\bper\b\s+((?:(?!\bper\b)[a-z0-9]+\s+){0,2}(?!\bper\b)[a-z0-9]+)", text
+    )
+    per_phrases = [p.strip() for p in per_phrases]
+    if len(per_phrases) >= 3 and len(set(per_phrases)) > 1:
+        return True
+    if len(per_phrases) == 2 and len(set(per_phrases)) > 1:
+        # Two distinct per-units are only supported when one is a recognised
+        # time/fee unit (e.g. "per active user per month").
+        time_units = {"month", "year", "day", "transaction", "charge", "dispute", "refund", "payout", "invoice"}
+        if not any(any(t in p.split() for t in time_units) for p in per_phrases):
+            return True
+    return False
 
 
 def _looks_like_price_line(line: str) -> bool:
@@ -795,8 +934,16 @@ def _looks_like_price_line(line: str) -> bool:
         return True
     if line in {"per", "month", "year", "transaction", "transactions", "learn more", "compare plans"}:
         return True
-    # A heading is not just a number, currency symbol, or percentage.
-    return bool(re.fullmatch(r"[\d¢$€£¥₹A-Z,.]+(?:\s*per)?", line))
+    stripped = line.strip()
+    if re.fullmatch(r"[\d\s,.]+", stripped):
+        return True
+    # A heading is not just a currency code/symbol and/or an amount.
+    currency_parts = sorted(set(CURRENCY_CODES) | set(CURRENCY_SYMBOLS), key=len, reverse=True)
+    currency_pattern = "|".join(re.escape(c) for c in currency_parts)
+    price_pattern = rf"(?i)^\s*(?:{currency_pattern})?\s*[\d\s,.]*\s*(?:{currency_pattern})?\s*(?:per)?\s*$"
+    if re.fullmatch(price_pattern, stripped):
+        return True
+    return False
 
 
 def _heading_to_snake_case(heading: str) -> str:
@@ -1001,6 +1148,11 @@ def _product_from_heading(fee_category: str | None) -> str | None:
         ("radar", "radar"),
         ("platform", "platform"),
         ("marketplace", "platform"),
+        ("connect", "connect"),
+        ("identity", "identity"),
+        ("sigma", "sigma"),
+        ("billing", "billing"),
+        ("payout", "payouts"),
         ("tax", "tax"),
     ]
     for keyword, product in heading_products:
@@ -1070,14 +1222,15 @@ def _infer_product_id(entry: PricingEntry) -> str:
             return "terminal"
         return method
 
-    # No explicit payment method: infer from the section heading / fee category
-    # and the source text.  Add-on and non-payment headings can appear in the
-    # text itself (e.g. "... Managed Payments transaction" under a generic
-    # section), so the source text is included in the heuristic scan.
+    # No explicit payment method: infer from the section heading / fee category,
+    # the source text, and the surrounding evidence.  Add-on and non-payment
+    # headings can appear in the surrounding cell text (e.g. "Subscription and
+    # cancellation terms apply" under a "Pay monthly" row).
     path = " ".join(p.lower() for p in entry.section_path)
     category = (entry.fee_category or "").lower()
     text = entry.source_text.lower()
-    combined = path + " " + category + " " + text
+    evidence = (entry.source_evidence or "").lower()
+    combined = path + " " + category + " " + text + " " + evidence
 
     if _text_has(combined, "smart dispute", "smart disputes"):
         return "smart_disputes"
@@ -1095,7 +1248,10 @@ def _infer_product_id(entry: PricingEntry) -> str:
         return "custom_domain"
     if _text_has(combined, "post-payment invoice", "post payment invoice"):
         return "post_payment_invoice"
-    if _text_has(combined, "adaptive pricing") or _text_has(combined, "foreign exchange", "fx"):
+    if (
+        _text_has(combined, "adaptive pricing", "adaptive acceptance", "uplift")
+        or _text_has(combined, "foreign exchange", "fx", "converted amount")
+    ):
         return "adaptive_pricing"
     if _text_has(combined, "invoic"):
         return "invoicing"
@@ -1107,8 +1263,18 @@ def _infer_product_id(entry: PricingEntry) -> str:
         return "managed_payments"
     if _text_has(combined, "radar"):
         return "radar"
-    if _text_has(combined, "platform", "marketplace"):
+    if _text_has(combined, "platform", "marketplace", "connect"):
         return "platform"
+    if _text_has(combined, "identity verification", "identity"):
+        return "identity"
+    if _text_has(combined, "sigma"):
+        return "sigma"
+    if _text_has(combined, "billing"):
+        return "billing"
+    if _text_has(combined, "payout") and not _text_has(combined, "instant payout"):
+        return "payouts"
+    if _text_has(combined, "tax"):
+        return "tax"
     if _text_has(combined, "terminal", "tap to pay", "in-person", "in person", "reader"):
         return "terminal"
 
@@ -1118,6 +1284,11 @@ def _infer_product_id(entry: PricingEntry) -> str:
     # "payment methods" headings as card payments when no card or explicit
     # method token is present.
     if "card" in combined or ("payment" in combined and not _text_has(combined, "payment methods", "payment method")):
+        return "payments"
+    # Surcharges for regional payment-method groups (e.g. "South Korean payment
+    # methods + 1.5% for international transactions") are payment fees even though
+    # no individual method token is present.
+    if _has_base_fee(entry) and "payment methods" in combined:
         return "payments"
     if _text_has(combined, "ach"):
         return "ach_direct_debit"
@@ -1173,6 +1344,7 @@ def _infer_pricing_plan(entry: PricingEntry) -> str | None:
 
 def _infer_variant_id(entry: PricingEntry, product_id: str, account_country: str | None) -> str:
     pricing_plan = _infer_pricing_plan(entry)
+    product_feature = _infer_product_feature(entry, product_id)
 
     # Add-on products use stable variants keyed to their pricing plan, and
     # Smart Disputes uses a won/lost variant keyed to the dispute state.
@@ -1188,6 +1360,11 @@ def _infer_variant_id(entry: PricingEntry, product_id: str, account_country: str
     if product_id == "adaptive_pricing" and pricing_plan:
         return f"{pricing_plan}_pricing"
 
+    # Products whose headings or evidence explicitly name a tier/feature use
+    # that as the variant (e.g. Tax Basic vs Tax Complete).
+    if product_id in {"tax", "identity", "billing"} and product_feature:
+        return product_feature
+
     channel = _infer_channel(entry) or "online"
     payment_method = _infer_payment_method(entry)
     card_region = _infer_card_region(entry, account_country)
@@ -1202,18 +1379,22 @@ def _infer_exactness(parsed: dict[str, Any], phrase: str) -> str:
     lower = phrase.lower()
     if _text_has(lower, "contact sales", "custom quote"):
         return "custom"
-    if "starting at" in lower or "starting from" in lower:
+    if _text_has(lower, "starting at", "starting from", "starts at", "starts from"):
         return "from"
-    if _text_has(lower, "capped at", "cap at", "cap", "maximum", "max"):
+    if re.search(r"\b(?:capped at|cap at|cap|maximum|max)\b", lower):
         return "range"
     if "up to" in lower and not re.search(r"up to \d+\s?(month|months|day|days|week|weeks|year|years)", lower):
         return "range"
-    if "minimum" in lower or "min" in lower:
+    if re.search(r"\b(?:minimum|min)\b", lower):
         return "from"
     if _text_has(lower, "included", "no additional fee"):
         return "included"
     if "free" in lower or "no fee" in lower:
         return "free"
+    # Package/allotment pricing with overages cannot be represented as a
+    # simple per-event fee, so keep it as a custom-quote row.
+    if _text_has(lower, "overages", "overage", "allotment", "volume pricing", "custom package"):
+        return "custom"
     # A concrete fee with "custom pricing" wording is an explicitly scoped paid
     # variant, not a custom-quote exactness.
     if (
@@ -1420,6 +1601,18 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
         return "per_invoice"
     if "per payout" in text:
         return "per_payout"
+    if "per refund" in text:
+        return "per_refund"
+    if "per verification" in text:
+        return "per_verification"
+    if "per active user" in text or "per user" in text:
+        return "per_active_user"
+    if "per connected account" in text:
+        return "per_connected_account"
+    if re.search(r"per\s+calculation\s+api\s+call|per\s+api\s+call|api\s+call", text):
+        return "per_api_call"
+    if "per screened transaction" in text or "per screened payment" in text:
+        return "per_screened_transaction"
     if (
         "per authorisation" in text
         or "per authorization" in text
@@ -1452,6 +1645,7 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
     product_unit_defaults: dict[str, str] = {
         "payments": "per_transaction",
         "instant_payouts": "per_payout",
+        "payouts": "per_payout",
         "adaptive_pricing": "per_transaction",
         "post_payment_invoice": "per_invoice",
         "invoicing": "per_invoice",
@@ -1461,6 +1655,14 @@ def _infer_unit(entry: PricingEntry, product_id: str) -> str | None:
         "radar": "per_transaction",
         "smart_disputes": "per_dispute",
         "ach_direct_debit": "per_transaction",
+        "identity": "per_verification",
+        "billing": "per_transaction",
+        "subscriptions": "per_transaction",
+        "platform": "per_transaction",
+        "connect": "per_transaction",
+        "stablecoin_payments": "per_transaction",
+        "refunds": "per_refund",
+        "sigma": "per_charge",
     }
     if product_id in product_unit_defaults:
         return product_unit_defaults[product_id]
@@ -1544,12 +1746,18 @@ def _has_base_fee(entry: PricingEntry, parsed: dict[str, Any] | None = None) -> 
 def _entry_component_hint(entry: PricingEntry) -> str:
     """Characterise the role of this entry within its logical pricing row."""
     parsed = parse_fee_value(entry.source_text)
-    lower = entry.source_text.lower()
-    exactness = _infer_exactness(parsed, entry.source_text)
+    # For rows that already state a concrete fee, marketing prose in the
+    # surrounding cell should not override the fee's exactness.
+    if _has_base_fee(entry, parsed) and _is_explicit_fee_phrase(entry.source_text):
+        text = entry.source_text
+    else:
+        text = entry.source_text + " " + (entry.source_evidence or "")
+    lower = text.lower()
+    exactness = _infer_exactness(parsed, text)
 
-    if exactness == "range" or _text_has(lower, "cap", "capped", "maximum", "max"):
+    if exactness == "range" or re.search(r"\b(?:cap|capped|maximum|max)\b", lower):
         return "maximum"
-    if _text_has(lower, "minimum", "min"):
+    if re.search(r"\b(?:minimum|min)\b", lower):
         return "minimum"
     if exactness == "included" or "no additional" in lower:
         return "included"
@@ -1559,6 +1767,10 @@ def _entry_component_hint(entry: PricingEntry) -> str:
         return "custom"
     if exactness == "from" or "starting at" in lower or "starting from" in lower:
         return "from"
+    # An "uplift" is a fee itself, not a surcharge applied on top of another
+    # fee (e.g. Adaptive Acceptance uplift).
+    if "uplift" in lower:
+        return "base"
     tokens = entry.tokens or parsed.get("tokens") or []
     is_single_surcharge_token = len(tokens) == 1 and tokens[0].operator == "+" and not _is_tap_to_pay(entry)
     if (entry.source_text.strip().startswith("+") or is_single_surcharge_token) and not _is_tap_to_pay(entry):
@@ -1764,7 +1976,13 @@ def _classify_group(
         raw_source_texts.append(entry.source_text)
         hint = _entry_component_hint(entry)
         fee_components.extend(_build_components_for_entry(entry, hint))
-        entry_exactness = _infer_exactness(parse_fee_value(entry.source_text), entry.source_text)
+        parsed = parse_fee_value(entry.source_text)
+        # Concrete fee rows should not be re-classified by surrounding marketing text.
+        if _has_base_fee(entry, parsed) and _is_explicit_fee_phrase(entry.source_text):
+            exact_text = entry.source_text
+        else:
+            exact_text = entry.source_text + " " + (entry.source_evidence or "")
+        entry_exactness = _infer_exactness(parsed, exact_text)
         if exactness is None or entry_exactness in {"custom", "from", "range"}:
             exactness = entry_exactness
         all_conditions.extend(_infer_conditions(entry, item["product_id"], item["variant_id"], account_country))
@@ -1817,6 +2035,7 @@ def _classify_group(
             in {
                 "disputes",
                 "instant_payouts",
+                "payouts",
                 "three_d_secure",
                 "payments",
                 "adaptive_pricing",
@@ -1827,6 +2046,15 @@ def _classify_group(
                 "radar",
                 "smart_disputes",
                 "ach_direct_debit",
+                "subscriptions",
+                "billing",
+                "identity",
+                "custom_domain",
+                "platform",
+                "connect",
+                "stablecoin_payments",
+                "refunds",
+                "sigma",
             }
             or _text_has(base_entry.source_text.lower(), "card", "payment")
         ):
@@ -1871,6 +2099,12 @@ def _classify_group(
     # A rule must have a channel, unit, and behavior to be calculation-ready.
     if classification_status == CALCULABLE_RULE and (not channel or not unit or not behavior):
         classification_status = NON_CALCULABLE
+
+    # Stacked per-unit dimensions on an otherwise unrecognised product (e.g.
+    # "per institution per account holder per month") cannot be modelled
+    # deterministically.
+    if product_id == "unspecified" and _is_unsupported_multi_per_shape(base_entry, unit):
+        classification_status = UNSUPPORTED_SHAPE
 
     confidence = fee_evidence.confidence
     if classification_status == CALCULABLE_RULE and (not channel or not unit or not behavior):
@@ -2472,24 +2706,56 @@ def _deduplicate_rules(rules: list[FeeRule]) -> list[FeeRule]:
 
 def _is_marketing_or_statistical(entry: PricingEntry) -> bool:
     """Return True when an entry is clearly marketing or a platform statistic."""
-    lower = (entry.source_text + " " + (entry.source_evidence or "")).lower()
+    text = (entry.source_text + " " + (entry.source_evidence or "")).lower()
+    source_lower = entry.source_text.lower()
+    # Market/adoption statistics are never merchant fees, even when they also
+    # contain fee-adjacent words such as "pricing".
+    if _is_market_share_text(entry.source_text):
+        return True
+    # A row that already describes a concrete fee should never be discarded.
+    if _is_explicit_fee_phrase(text) and _has_base_fee(entry):
+        return False
     return (
-        ("99.999%" in lower and "uptime" in lower)
-        or "250 million" in lower
-        or "api requests" in lower
-        or "maximise your revenue" in lower
-        or "maximize your revenue" in lower
-        or ("pci compliant" in lower and not re.search(r"\d+(?:\.\d+)?%?\s*(?:per|month|year|transaction)", lower))
+        ("99.999%" in text and "uptime" in text)
+        or "250 million" in text
+        or "api requests" in text
+        or "maximise your revenue" in text
+        or "maximize your revenue" in text
+        or ("pci compliant" in text and not re.search(r"\d+(?:\.\d+)?%?\s*(?:per|month|year|transaction)", text))
+        or "return on investment" in text
+        or "category leaders" in text
+        or "process more than" in text
+        or "process over" in text
+        or (source_lower.startswith("included:") and not _has_base_fee(entry))
+        or "from startups to fortune" in text
+        or "start building your integration" in text
+        or "explore how" in text
+        or "chose stripe" in text
+        or "simplified cross-border payments with stripe" in text
+        or ("migrated" in text and "months" in text)
+        or "of subscription volume" in text
+        or "of customers" in text
+        or "tapped into" in text
+        or "increased" in text and "with stripe" in text
+        or "learn why" in text
+        or "read the docs" in text
+        or "customers use stripe" in text
     )
 
 
 def _derive_status(rules: list[FeeRule], unclassified: list[PricingEntry]) -> str:
     authoritative = [r for r in rules if r.classification_status != "conflict"]
+    unresolved = [
+        e
+        for e in unclassified
+        if e.classification_status
+        not in {IGNORED_NON_FEE, INFORMATIONAL, REFERENCE_ONLY, CUSTOM_PRICING, INCLUDED, FREE, UNSUPPORTED_SHAPE}
+    ]
     if not rules and not unclassified:
         return "unclassified"
     if not authoritative:
         return "partial"
-    if not unclassified:
+    if not unresolved:
         return "complete"
     return "partial"
 
@@ -2499,7 +2765,9 @@ def _numeric_source_entries(entries: list[PricingEntry]) -> list[PricingEntry]:
     return [
         e
         for e in entries
-        if _has_base_fee(e) and e.classification_status not in {IGNORED_NON_FEE, INFORMATIONAL, REFERENCE_ONLY}
+        if _has_base_fee(e)
+        and e.classification_status
+        not in {IGNORED_NON_FEE, INFORMATIONAL, REFERENCE_ONLY, CUSTOM_PRICING, INCLUDED, FREE, UNSUPPORTED_SHAPE}
     ]
 
 
@@ -2532,6 +2800,8 @@ def _coverage_summary(
     for rule in rules:
         if rule.classification_status == CALCULABLE_RULE:
             summary = summary.model_copy(update={"calculable_rules": summary.calculable_rules + 1})
+        elif rule.classification_status == NON_CALCULABLE:
+            summary = summary.model_copy(update={"non_calculable_rules": summary.non_calculable_rules + 1})
         elif rule.classification_status == "conflict":
             summary = summary.model_copy(
                 update={"conflicting_rule_identities": summary.conflicting_rule_identities + 1}
@@ -2540,8 +2810,16 @@ def _coverage_summary(
                 summary = summary.model_copy(update={"blocking_fee_conflicts": summary.blocking_fee_conflicts + 1})
             else:
                 summary = summary.model_copy(update={"informational_conflicts": summary.informational_conflicts + 1})
-        else:
-            summary = summary.model_copy(update={"non_calculable_rules": summary.non_calculable_rules + 1})
+        elif rule.classification_status == INCLUDED:
+            summary = summary.model_copy(update={"included": summary.included + 1})
+        elif rule.classification_status == FREE:
+            summary = summary.model_copy(update={"free": summary.free + 1})
+        elif rule.classification_status == INFORMATIONAL:
+            summary = summary.model_copy(update={"informational": summary.informational + 1})
+        elif rule.classification_status == CUSTOM_PRICING:
+            summary = summary.model_copy(update={"custom_pricing": summary.custom_pricing + 1})
+        elif rule.classification_status == UNSUPPORTED_SHAPE:
+            summary = summary.model_copy(update={"unsupported_fee_shapes": summary.unsupported_fee_shapes + 1})
     for entry in unclassified:
         status = entry.classification_status
         if status == UNCLASSIFIED_CANDIDATE:
@@ -2558,12 +2836,18 @@ def _coverage_summary(
             summary = summary.model_copy(update={"reference_only": summary.reference_only + 1})
         if status == INCLUDED:
             summary = summary.model_copy(update={"included": summary.included + 1})
+        if status == FREE:
+            summary = summary.model_copy(update={"free": summary.free + 1})
+        if status == INFORMATIONAL:
+            summary = summary.model_copy(update={"informational": summary.informational + 1})
         if status == CUSTOM_PRICING:
             summary = summary.model_copy(update={"custom_pricing": summary.custom_pricing + 1})
     numeric_candidates = [
         e
         for e in unclassified
-        if _has_base_fee(e) and e.classification_status not in {IGNORED_NON_FEE, INFORMATIONAL, REFERENCE_ONLY}
+        if _has_base_fee(e)
+        and e.classification_status
+        not in {IGNORED_NON_FEE, INFORMATIONAL, REFERENCE_ONLY, CUSTOM_PRICING, INCLUDED, FREE, UNSUPPORTED_SHAPE}
     ]
     summary = summary.model_copy(update={"numeric_fee_candidates": len(numeric_candidates)})
     return summary
@@ -2580,10 +2864,13 @@ def _calculator_coverage_status(
             return "partial"
         return "unclassified"
     # If any remaining unclassified entry has a numeric fee value, coverage is partial.
+    # Custom-priced, included/free, and explicitly unsupported-shape entries are
+    # considered resolved.
+    resolved_unclassified_statuses = {IGNORED_NON_FEE, INFORMATIONAL, REFERENCE_ONLY, CUSTOM_PRICING, INCLUDED, FREE, UNSUPPORTED_SHAPE}
     numeric_unclassified = [
         e
         for e in unclassified
-        if _has_base_fee(e) and e.classification_status not in {IGNORED_NON_FEE, INFORMATIONAL, REFERENCE_ONLY}
+        if _has_base_fee(e) and e.classification_status not in resolved_unclassified_statuses
     ]
     if numeric_unclassified:
         return "partial"
@@ -2647,7 +2934,14 @@ def classify_entries(
                 UNSUPPORTED_SHAPE,
                 AMBIGUOUS,
             }:
-                status = UNCLASSIFIED_CANDIDATE
+                # Non-numeric text left over after grouping is informational by
+                # default; promotional text without a concrete price is custom.
+                if _is_promotional_language(leftover.source_text):
+                    status = CUSTOM_PRICING
+                elif not _has_base_fee(leftover):
+                    status = INFORMATIONAL
+                else:
+                    status = UNCLASSIFIED_CANDIDATE
             leftover = leftover.model_copy(
                 update={
                     "classification_status": status,

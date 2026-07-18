@@ -127,32 +127,100 @@ def _normalize_for_parsing(text: str) -> str:
 
 
 def _detect_decimal_separator(text: str) -> str:
-    """Detect whether dot or comma is the decimal separator."""
-    # Count comma/dot usage in numeric contexts with one or more decimal digits.
-    comma_count = len(re.findall(r"[0-9],[0-9]+(?![0-9])", text))
-    dot_count = len(re.findall(r"[0-9]\.[0-9]+(?![0-9])", text))
-    if comma_count > dot_count:
-        return ","
-    if dot_count > comma_count:
+    """Detect whether dot or comma is the decimal separator.
+
+    The detection is conservative: a comma followed by exactly three digits is
+    treated as a thousands separator unless a dot is also present and is the
+    rightmost separator.  A separator followed by one or two digits is the
+    decimal separator.
+    """
+    text = re.sub(r"[^0-9.,]", "", text)
+    if not text:
         return "."
-    # When both appear, prefer the separator followed by 1-2 digits as the decimal.
-    comma_decimal = len(re.findall(r"[0-9],[0-9]{1,2}(?![0-9])", text))
-    dot_decimal = len(re.findall(r"[0-9]\.[0-9]{1,2}(?![0-9])", text))
-    if comma_decimal and not dot_decimal:
+
+    last_dot = text.rfind(".")
+    last_comma = text.rfind(",")
+
+    # When both separators are present, the rightmost one is the decimal mark
+    # and the other is a thousands separator.
+    if last_dot != -1 and last_comma != -1:
+        if last_dot > last_comma:
+            return "."
         return ","
-    if dot_decimal and not comma_decimal:
+
+    # Only one separator type is present.
+    sep = "." if last_dot != -1 else ","
+    parts = text.split(sep)
+    if not parts or not parts[-1].isdigit():
+        return sep
+
+    # A trailing group of exactly three digits with preceding groups of three
+    # digits is a thousands grouping, not a decimal fraction.
+    if len(parts[-1]) == 3 and all(len(p) == 3 for p in parts[1:]):
         return "."
+
+    # A trailing group of one or two digits is a decimal fraction.
+    if len(parts[-1]) <= 2:
+        return sep
+
     return "."
 
 
 def _parse_decimal(text: str) -> Decimal | None:
     """Parse a decimal string respecting localized separators."""
-    text = text.strip()
+    text = text.strip().replace("\xa0", " ").replace(" ", "")
     if not text:
         return None
-    sep = _detect_decimal_separator(text)
-    # Remove thousands separators (whichever is not the decimal separator).
-    text = text.replace(".", "").replace(",", ".") if sep == "," else text.replace(",", "")
+    if text.isdigit():
+        return Decimal(text)
+
+    # First handle the simple cases where only one separator type appears.
+    last_dot = text.rfind(".")
+    last_comma = text.rfind(",")
+
+    if last_dot == -1 and last_comma == -1:
+        try:
+            return Decimal(text)
+        except InvalidOperation:
+            return None
+
+    # When both separators are present, the rightmost is the decimal mark.
+    if last_dot != -1 and last_comma != -1:
+        if last_dot > last_comma:
+            text = text.replace(",", "")
+        else:
+            text = text.replace(".", "").replace(",", ".")
+        try:
+            return Decimal(text)
+        except InvalidOperation:
+            return None
+
+    sep = "." if last_dot != -1 else ","
+    parts = text.split(sep)
+
+    # Recognize thousands groupings: every group except the first has exactly
+    # three digits and the first has one to three digits.
+    if (
+        all(p.isdigit() for p in parts)
+        and 1 <= len(parts[0]) <= 3
+        and all(len(p) == 3 for p in parts[1:])
+    ):
+        try:
+            return Decimal("".join(parts))
+        except InvalidOperation:
+            return None
+
+    # A trailing group of one or two digits means the separator is a decimal mark.
+    if len(parts[-1]) <= 2 and parts[-1].isdigit():
+        if sep == ",":
+            text = text.replace(".", "").replace(",", ".")
+        try:
+            return Decimal(text)
+        except InvalidOperation:
+            return None
+
+    # Fallback: remove the separator and parse as a whole number.
+    text = text.replace(sep, "")
     try:
         return Decimal(text)
     except InvalidOperation:

@@ -387,6 +387,12 @@ class FeeRule(BaseModel):
             "per_attempt",
             "per_dispute",
             "per_payout",
+            "per_refund",
+            "per_api_call",
+            "per_verification",
+            "per_screened_transaction",
+            "per_connected_account",
+            "per_active_user",
             "monthly",
             "yearly",
             "per_invoice",
@@ -490,6 +496,8 @@ class CoverageSummary(BaseModel):
     ignored_non_fee: int = 0
     reference_only: int = 0
     included: int = 0
+    free: int = 0
+    informational: int = 0
     custom_pricing: int = 0
     blocking_fee_conflicts: int = 0
     informational_conflicts: int = 0

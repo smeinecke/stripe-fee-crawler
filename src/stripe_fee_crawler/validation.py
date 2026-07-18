@@ -484,9 +484,14 @@ def _label_references_component(
                     if Decimal(candidate.replace(",", "")) == amount_dec:
                         return True
                 elif "," in candidate and "." not in candidate:
-                    # e.g. "0,25" -> comma is the decimal separator.
-                    if Decimal(candidate.replace(",", ".")) == amount_dec:
-                        return True
+                    # e.g. "0,25" -> comma is the decimal separator, or
+                    # "1,500" -> comma is a thousands separator.
+                    for normalised in (candidate.replace(",", "."), candidate.replace(",", "")):
+                        try:
+                            if Decimal(normalised) == amount_dec:
+                                return True
+                        except Exception:
+                            pass
                 else:
                     if Decimal(candidate) == amount_dec:
                         return True

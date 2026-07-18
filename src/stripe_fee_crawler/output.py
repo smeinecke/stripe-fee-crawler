@@ -183,6 +183,8 @@ class OutputPublisher:
         """Consolidate classified rules across markets into core-fees.json."""
         core_entries: list[CoreFeeEntry] = []
         for output in sorted(outputs, key=lambda o: o.market.account_country):
+            if output.unsupported_reason or output.derivation_status == "unclassified":
+                continue
             country = output.market.account_country
             rules = [
                 _to_core_fee_rule(r)
