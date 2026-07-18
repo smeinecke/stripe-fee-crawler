@@ -72,6 +72,7 @@ def _crawler_revision(crawler_dir: Path | None = None) -> str | None:
     for candidate in candidates:
         if not candidate.exists():
             continue
+        result = None
         try:
             result = subprocess.run(  # nosec
                 ["git", "rev-parse", "HEAD"],
@@ -80,11 +81,12 @@ def _crawler_revision(crawler_dir: Path | None = None) -> str | None:
                 text=True,
                 check=False,
             )
+        except Exception as exc:
+            logger.debug("Cannot read crawler revision from %s: %s", candidate, exc)
+        if result is not None:
             rev = result.stdout.strip()
             if rev:
                 return rev
-        except Exception:
-            continue
     return None
 
 
