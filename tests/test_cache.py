@@ -344,6 +344,230 @@ def test_atomic_publication_does_not_remove_cache(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Cache policy tests
+# ---------------------------------------------------------------------------
+
+
+def _write_cache_entry(
+    cache_dir: Path,
+    url: str,
+    headers: dict[str, str],
+    fetched_at: float,
+    cache_control: str | None,
+    content: bytes = b"<html>cached</html>",
+    market: str = "US",
+    locale: str = "en-US",
+) -> Path:
+    from stripe_fee_crawler.http_cache import _cache_key
+
+    key = _cache_key("GET", url, market, locale, headers)
+    entry_path = cache_dir / "entries" / key[:2] / f"{key}.json"
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "v": "2",
+        "key": key,
+        "url": url,
+        "final_url": url,
+        "status_code": 200,
+        "headers": {"content-type": "text/html"},
+        "content": base64.b64encode(content).decode("ascii"),
+        "etag": '"abc"',
+        "last_modified": None,
+        "fetched_at": fetched_at,
+        "market": market,
+        "locale": locale,
+        "detected_market": market,
+        "detected_locale": locale,
+        "cache_control": cache_control,
+    }
+    entry_path.write_text(json.dumps(entry, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+    return entry_path
+
+
+@pytest.mark.asyncio
+async def test_ttl_policy_ignores_shorter_origin_max_age(tmp_path: Path) -> None:
+    """Configured TTL (24h) wins over a short origin max-age when policy is ttl."""
+    cache_dir = tmp_path
+    url = "https://stripe.com/pricing"
+    headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US"}
+    age = 2 * 3600  # 2 hours
+    _write_cache_entry(
+        cache_dir,
+        url,
+        headers,
+        fetched_at=time.time() - age,
+        cache_control="max-age=60",
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "headers": dict(request.headers)})
+        return httpx.Response(200, content=b"<html>network</html>")
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(
+        max_workers=1,
+        request_delay=0.0,
+        cache_dir=str(cache_dir),
+        cache_ttl_hours=24.0,
+        cache_policy="ttl",
+    )
+    client = HttpClient(config, transport=transport)
+    response = await client.get(url, market="US", locale="en-US")
+    assert response.text == "<html>cached</html>"
+    assert response.from_cache is True
+    assert client.cache_stats.cache_hits == 1
+    assert client.cache_stats.network_requests == 0
+    assert len(calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_http_policy_revalidates_when_origin_max_age_expired(tmp_path: Path) -> None:
+    """http policy respects a short origin max-age and revalidates once it expires."""
+    cache_dir = tmp_path
+    url = "https://stripe.com/pricing"
+    headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US"}
+    age = 2 * 3600
+    _write_cache_entry(
+        cache_dir,
+        url,
+        headers,
+        fetched_at=time.time() - age,
+        cache_control="max-age=60",
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "headers": dict(request.headers)})
+        if request.headers.get("if-none-match") == '"abc"':
+            return httpx.Response(304, headers={"etag": '"abc"'})
+        return httpx.Response(200, content=b"<html>network</html>")
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(
+        max_workers=1,
+        request_delay=0.0,
+        cache_dir=str(cache_dir),
+        cache_ttl_hours=24.0,
+        cache_policy="http",
+    )
+    client = HttpClient(config, transport=transport)
+    response = await client.get(url, market="US", locale="en-US")
+    assert response.text == "<html>cached</html>"
+    assert response.from_cache is True
+    assert client.cache_stats.cache_revalidations >= 1
+    assert client.cache_stats.network_requests == 1
+    assert client.cache_stats.cache_hits == 0
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_ttl_policy_ignores_origin_no_cache_and_max_age_zero(tmp_path: Path) -> None:
+    """In ttl policy, origin no-cache and max-age=0 do not force revalidation."""
+    cache_dir = tmp_path
+    url = "https://stripe.com/pricing"
+    headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US"}
+    _write_cache_entry(
+        cache_dir,
+        url,
+        headers,
+        fetched_at=time.time() - 2 * 3600,
+        cache_control="no-cache, max-age=0",
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "headers": dict(request.headers)})
+        return httpx.Response(200, content=b"<html>network</html>")
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(
+        max_workers=1,
+        request_delay=0.0,
+        cache_dir=str(cache_dir),
+        cache_ttl_hours=24.0,
+        cache_policy="ttl",
+    )
+    client = HttpClient(config, transport=transport)
+    response = await client.get(url, market="US", locale="en-US")
+    assert response.text == "<html>cached</html>"
+    assert response.from_cache is True
+    assert client.cache_stats.network_requests == 0
+    assert len(calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_entries_older_than_configured_ttl_revalidate(tmp_path: Path) -> None:
+    """An entry older than the configured TTL revalidates regardless of origin directives."""
+    cache_dir = tmp_path
+    url = "https://stripe.com/pricing"
+    headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US"}
+    _write_cache_entry(
+        cache_dir,
+        url,
+        headers,
+        fetched_at=time.time() - 25 * 3600,
+        cache_control="max-age=86400",
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "headers": dict(request.headers)})
+        return httpx.Response(304, headers={"etag": '"abc"'})
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(
+        max_workers=1,
+        request_delay=0.0,
+        cache_dir=str(cache_dir),
+        cache_ttl_hours=24.0,
+        cache_policy="ttl",
+    )
+    client = HttpClient(config, transport=transport)
+    response = await client.get(url, market="US", locale="en-US")
+    assert response.text == "<html>cached</html>"
+    assert response.from_cache is True
+    assert client.cache_stats.cache_revalidations >= 1
+    assert client.cache_stats.network_requests == 1
+
+
+@pytest.mark.asyncio
+async def test_two_separate_crawler_processes_reuse_fresh_ttl_entry(tmp_path: Path) -> None:
+    """A fresh entry written by one process is reused by another with ttl policy."""
+    cache_dir = tmp_path
+    url = "https://stripe.com/pricing"
+    headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US"}
+    _write_cache_entry(
+        cache_dir,
+        url,
+        headers,
+        fetched_at=time.time() - 2 * 3600,
+        cache_control="max-age=60",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        pytest.fail("Network should not be called for a fresh ttl entry")
+
+    config = CrawlConfiguration(
+        max_workers=1,
+        request_delay=0.0,
+        cache_dir=str(cache_dir),
+        cache_ttl_hours=24.0,
+        cache_policy="ttl",
+    )
+    transport = httpx.MockTransport(handler)
+    client = HttpClient(config, transport=transport)
+    response = await client.get(url, market="US", locale="en-US")
+    assert response.text == "<html>cached</html>"
+    assert response.from_cache is True
+    assert client.cache_stats.network_requests == 0
+
+
+# ---------------------------------------------------------------------------
 # Makefile target tests
 # ---------------------------------------------------------------------------
 
@@ -362,10 +586,11 @@ def test_makefile_regenerate_uses_persistent_cache() -> None:
     assert result.returncode == 0, result.stderr
     assert "--cache-dir" in result.stdout
     assert "--cache-ttl-hours" in result.stdout
+    assert "--cache-policy" in result.stdout
     assert ".cache/stripe-fee-crawler/http" in result.stdout
 
 
-def test_makefile_regenerate_strict_uses_persistent_cache() -> None:
+def test_makefile_regenerate_strict_uses_ttl_policy() -> None:
     result = subprocess.run(
         ["make", "-n", "regenerate-strict"],
         cwd=str(CRAWLER_DIR),
@@ -376,6 +601,8 @@ def test_makefile_regenerate_strict_uses_persistent_cache() -> None:
     assert result.returncode == 0, result.stderr
     assert "--cache-dir" in result.stdout
     assert "--cache-ttl-hours" in result.stdout
+    assert "--cache-policy" in result.stdout
+    assert "--cache-policy ttl" in result.stdout or '--cache-policy "ttl"' in result.stdout
     assert "--fail-on-regression" in result.stdout
 
 
@@ -390,6 +617,7 @@ def test_makefile_regenerate_refresh_uses_refresh_cache() -> None:
     assert result.returncode == 0, result.stderr
     assert "--refresh-cache" in result.stdout
     assert "--cache-dir" in result.stdout
+    assert "--cache-policy" in result.stdout
 
 
 # ---------------------------------------------------------------------------
@@ -404,6 +632,7 @@ def test_crawl_report_includes_cache_stats() -> None:
     assert stats["cache_enabled"] is True
     assert stats["cache_dir"] == "/tmp/cache"
     assert stats["cache_ttl_hours"] == 24.0
+    assert stats["cache_policy"] == "ttl"
     assert "cache_hits" in stats
     assert "cache_misses" in stats
     assert "cache_writes" in stats

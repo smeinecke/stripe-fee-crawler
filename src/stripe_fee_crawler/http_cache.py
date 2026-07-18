@@ -280,6 +280,7 @@ class HttpCache:
         self._enabled = self._configured_dir is not None and not config.no_cache
         self._cache_dir = self._configured_dir if self._enabled else None
         self._ttl_seconds = config.cache_ttl_hours * 3600.0
+        self._cache_policy = config.cache_policy
         self._refresh = config.refresh_cache
         self._key_locks: dict[str, asyncio.Lock] = {}
         self._file_locks: dict[str, _FileLock] = {}
@@ -287,6 +288,7 @@ class HttpCache:
             cache_enabled=self._enabled,
             cache_dir=str(self._configured_dir) if self._configured_dir else None,
             cache_ttl_hours=config.cache_ttl_hours,
+            cache_policy=config.cache_policy,
         )
 
     def _key(self, method: str, url: str, market: str | None, locale: str | None, headers: dict[str, str]) -> str:
@@ -333,37 +335,45 @@ class HttpCache:
     def _is_fresh(self, entry: _CacheEntry) -> bool:
         """Return True if the stored entry may be served without revalidation.
 
-        The crawler's configured snapshot TTL controls reuse for public pricing
-        pages. Origin ``no-cache`` or ``max-age=0`` directives are intentionally
-        ignored so that repeated regenerations within the TTL do not revalidate
-        on every run. A positive ``max-age`` shorter than the snapshot TTL is
-        respected as an upper bound.
+        In ``ttl`` policy, the crawler's configured snapshot TTL controls reuse
+        for public pricing pages. Origin ``no-cache``, ``max-age=0``, and shorter
+        positive ``max-age`` values are intentionally ignored so that repeated
+        regenerations within the local TTL do not revalidate on every run.
+
+        In ``http`` policy, origin directives are respected normally (``no-cache``
+        and ``max-age=0`` require revalidation, positive ``max-age`` is an upper
+        bound, and ``Expires`` is consulted when present).
         """
-        directives = _parse_cache_control(entry.cache_control)
+        age = time.time() - entry.fetched_at
+        if age >= self._ttl_seconds:
+            return False
 
-        # max-age (or shared-cache s-maxage) is an upper bound on freshness.
-        max_age_value = directives.get("s-maxage") or directives.get("max-age")
-        if max_age_value is not None:
-            try:
-                max_age = int(max_age_value)
-            except ValueError:
-                max_age = None
-            if max_age and max_age > 0:
-                return (time.time() - entry.fetched_at) < min(max_age, self._ttl_seconds)
+        if self._cache_policy == "http":
+            directives = _parse_cache_control(entry.cache_control)
 
-        # Fall back to Expires if it is later than now and within the TTL.
-        expires = entry.headers.get("expires")
-        if expires:
-            try:
-                expires_dt = parsedate_to_datetime(expires)
-                expires_ts = expires_dt.timestamp()
-                now = time.time()
-                if now < expires_ts and (now - entry.fetched_at) < self._ttl_seconds:
-                    return True
-            except Exception:  # nosec B110
-                pass
+            if "no-cache" in directives:
+                return False
 
-        return (time.time() - entry.fetched_at) < self._ttl_seconds
+            max_age_value = directives.get("s-maxage") or directives.get("max-age")
+            if max_age_value is not None:
+                try:
+                    max_age = int(max_age_value)
+                except ValueError:
+                    max_age = None
+                if max_age is not None:
+                    if max_age == 0:
+                        return False
+                    return age < min(max_age, self._ttl_seconds)
+
+            expires = entry.headers.get("expires")
+            if expires:
+                try:
+                    expires_ts = parsedate_to_datetime(expires).timestamp()
+                    return time.time() < expires_ts
+                except Exception:  # nosec B110
+                    pass
+
+        return True
 
     def _read_entry(self, key: str) -> _CacheEntry | None:
         if self._cache_dir is None:

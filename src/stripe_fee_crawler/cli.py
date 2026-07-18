@@ -56,6 +56,7 @@ def _config_from_options(
     source_timestamp: str | None = None,
     cache_dir: str | None = None,
     cache_ttl_hours: float | None = None,
+    cache_policy: str | None = None,
     no_cache: bool = False,
     refresh_cache: bool = False,
 ) -> CrawlConfiguration:
@@ -72,11 +73,23 @@ def _config_from_options(
         cache_ttl_hours=cache_ttl_hours
         if cache_ttl_hours is not None
         else _env_float("STRIPE_FEE_CRAWLER_CACHE_TTL_HOURS", 24.0),
+        cache_policy=_parse_cache_policy(
+            cache_policy,
+            _env_default("STRIPE_FEE_CRAWLER_CACHE_POLICY"),
+        ),
         no_cache=no_cache
         or _parse_env_bool("STRIPE_FEE_CRAWLER_NO_CACHE", _env_default("STRIPE_FEE_CRAWLER_NO_CACHE")),
         refresh_cache=refresh_cache
         or _parse_env_bool("STRIPE_FEE_CRAWLER_REFRESH_CACHE", _env_default("STRIPE_FEE_CRAWLER_REFRESH_CACHE")),
     )
+
+
+def _parse_cache_policy(explicit: str | None, env_value: str | None) -> str:
+    """Return a normalized cache policy (``ttl`` or ``http``)."""
+    value = (explicit or env_value or "ttl").strip().lower()
+    if value in {"ttl", "http"}:
+        return value
+    raise ConfigurationError(f"Invalid cache policy: {value!r} (expected ttl or http)")
 
 
 def _env_default(name: str) -> str | None:
@@ -139,6 +152,9 @@ async def _discover_markets(ctx: click.Context, config: CrawlConfiguration) -> N
 @click.option("--source-timestamp", default=None)
 @click.option("--cache-dir", type=click.Path(), help="Directory for the HTTP response cache.")
 @click.option("--cache-ttl-hours", type=float, help="Cache entry TTL in hours.")
+@click.option(
+    "--cache-policy", type=click.Choice(["ttl", "http"]), help="Cache freshness policy: ttl (default) or http."
+)
 @click.option("--no-cache", is_flag=True, help="Bypass cache reads and writes.")
 @click.option("--refresh-cache", is_flag=True, help="Force network revalidation/update.")
 @click.pass_context
@@ -155,6 +171,7 @@ def crawl_market_cmd(
     source_timestamp: str | None,
     cache_dir: str | None,
     cache_ttl_hours: float | None,
+    cache_policy: str | None,
     no_cache: bool,
     refresh_cache: bool,
 ) -> None:
@@ -184,6 +201,7 @@ def crawl_market_cmd(
         source_timestamp=source_timestamp,
         cache_dir=cache_dir,
         cache_ttl_hours=cache_ttl_hours,
+        cache_policy=cache_policy,
         no_cache=no_cache,
         refresh_cache=refresh_cache,
     )
@@ -228,6 +246,9 @@ async def _crawl_market(
 @click.option("--report", type=click.Path(), help="Write machine-readable JSON report to this path.")
 @click.option("--cache-dir", type=click.Path(), help="Directory for the HTTP response cache.")
 @click.option("--cache-ttl-hours", type=float, help="Cache entry TTL in hours.")
+@click.option(
+    "--cache-policy", type=click.Choice(["ttl", "http"]), help="Cache freshness policy: ttl (default) or http."
+)
 @click.option("--no-cache", is_flag=True, help="Bypass cache reads and writes.")
 @click.option("--refresh-cache", is_flag=True, help="Force network revalidation/update.")
 @click.pass_context
@@ -246,6 +267,7 @@ def crawl_cmd(
     report: str | None,
     cache_dir: str | None,
     cache_ttl_hours: float | None,
+    cache_policy: str | None,
     no_cache: bool,
     refresh_cache: bool,
 ) -> None:
@@ -261,6 +283,7 @@ def crawl_cmd(
         source_timestamp=source_timestamp,
         cache_dir=cache_dir,
         cache_ttl_hours=cache_ttl_hours,
+        cache_policy=cache_policy,
         no_cache=no_cache,
         refresh_cache=refresh_cache,
     )

@@ -120,6 +120,7 @@ class CacheStats(BaseModel):
     cache_enabled: bool = False
     cache_dir: str | None = None
     cache_ttl_hours: float = 24.0
+    cache_policy: str = "ttl"
     cache_hits: int = 0
     cache_misses: int = 0
     cache_revalidations: int = 0
@@ -885,6 +886,7 @@ class CrawlConfiguration(BaseModel):
     source_timestamp_override: str | None = None
     cache_dir: str | None = None
     cache_ttl_hours: float = 24.0
+    cache_policy: str = "ttl"
     no_cache: bool = False
     refresh_cache: bool = False
 

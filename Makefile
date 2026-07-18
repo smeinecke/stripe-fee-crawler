@@ -2,6 +2,7 @@
 
 CACHE_DIR ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/stripe-fee-crawler/http
 CACHE_TTL_HOURS ?= 24
+CACHE_POLICY ?= ttl
 
 .PHONY: all format check validate test test-unit test-live regenerate regenerate-strict regenerate-refresh help
 
@@ -38,13 +39,13 @@ test-live:
 	uv run pytest tests/ -m live
 
 regenerate:
-	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --cache-dir "$(CACHE_DIR)" --cache-ttl-hours "$(CACHE_TTL_HOURS)"
+	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --cache-dir "$(CACHE_DIR)" --cache-ttl-hours "$(CACHE_TTL_HOURS)" --cache-policy "$(CACHE_POLICY)"
 
 regenerate-strict:
-	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --fail-on-regression --cache-dir "$(CACHE_DIR)" --cache-ttl-hours "$(CACHE_TTL_HOURS)"
+	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --fail-on-regression --cache-dir "$(CACHE_DIR)" --cache-ttl-hours "$(CACHE_TTL_HOURS)" --cache-policy "$(CACHE_POLICY)"
 
 regenerate-refresh:
-	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --fail-on-regression --cache-dir "$(CACHE_DIR)" --cache-ttl-hours "$(CACHE_TTL_HOURS)" --refresh-cache
+	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --fail-on-regression --cache-dir "$(CACHE_DIR)" --cache-ttl-hours "$(CACHE_TTL_HOURS)" --cache-policy "$(CACHE_POLICY)" --refresh-cache
 
 validate: format check pyright bandit
 	@echo "Validation passed."
