@@ -486,6 +486,8 @@ class CoverageSummary(BaseModel):
     reference_only: int = 0
     included: int = 0
     custom_pricing: int = 0
+    blocking_fee_conflicts: int = 0
+    informational_conflicts: int = 0
 
 
 class MarketOutput(BaseModel):

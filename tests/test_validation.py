@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from stripe_fee_crawler.models import (
     CoreFeeEntry,
     CoreFeeRule,
     CoreFees,
+    CoverageSummary,
     FeeComponent,
     FeeCondition,
     FeeEvidence,
@@ -76,6 +78,34 @@ def test_validate_all_output(tmp_path: Path) -> None:
     publisher.commit(staging, validate=False)
     result = validate_all_output(tmp_path)
     assert result["success"]
+
+
+def test_strict_validation_fails_on_blocking_fee_conflicts(tmp_path: Path) -> None:
+    """Strict validation rejects any market whose coverage summary still reports blocking fee conflicts."""
+    json_dir = tmp_path / "json"
+    json_dir.mkdir()
+    market = Market(
+        stripe_market_code="en-us",
+        account_country="US",
+        country_name="United States",
+        locale="en-us",
+        url_prefix="https://stripe.com",
+        status="supported",
+    )
+    output = MarketOutput(
+        market=market,
+        sources=[Source(requested_url="https://stripe.com/pricing")],
+        derivation_status="partial",
+        calculator_coverage_status="partial",
+        coverage_summary=CoverageSummary(
+            source_entries=10,
+            blocking_fee_conflicts=1,
+        ),
+    )
+    (json_dir / "US.json").write_text(json.dumps(output.model_dump()))
+    with pytest.raises(CrawlerValidationError) as exc_info:
+        validate_all_output(tmp_path, strict=True)
+    assert "blocking fee conflict" in str(exc_info.value).lower()
 
 
 def test_validate_all_output_fails_on_invalid(tmp_path: Path) -> None:

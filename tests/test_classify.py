@@ -736,3 +736,129 @@ def test_lpm_modifiers_preserve_product_identity() -> None:
             assert cond.dimension not in {"card_region", "card_origin", "card_tier"}, (
                 f"{method}: non-card rule contains card-only dimension {cond.dimension}"
             )
+
+
+def test_india_card_type_and_network_split() -> None:
+    """India card pricing is split into debit/credit and domestic/international."""
+    cases = [
+        (
+            "2% for cards issued in India",
+            "online_domestic_credit_cards",
+            "credit",
+            [],
+            "2",
+        ),
+        (
+            "0.4% Domestic debit card transactions have the Merchant Discount Rate (MDR) of 0.4% capped to ₹200.",
+            "online_domestic_debit_cards",
+            "debit",
+            [],
+            "0.4",
+        ),
+        (
+            "3% for Mastercard and Visa cards issued outside India",
+            "online_international_credit_cards",
+            "credit",
+            ["mastercard", "visa"],
+            "3",
+        ),
+        (
+            "3.5% for American Express cards issued outside India",
+            "online_international_credit_cards",
+            "credit",
+            ["amex"],
+            "3.5",
+        ),
+    ]
+    for text, expected_variant, expected_type, expected_network, expected_pct in cases:
+        entry = PricingEntry(
+            entry_id=f"e-{expected_variant}-{expected_type}",
+            source_text=text,
+            source_url="https://stripe.com/in/pricing",
+            section_path=["Payments", "Online"],
+        )
+        rules, unclassified = classify_entries([entry], account_country="IN")
+        assert not unclassified, f"{text}: unexpected unclassified entry"
+        rule = next(
+            (r for r in rules if r.classification_status == "calculable_rule" or r.variant_id == expected_variant), None
+        )
+        assert rule is not None, f"{text}: no rule produced"
+        assert rule.variant_id == expected_variant, f"{text}: variant {rule.variant_id} != {expected_variant}"
+        assert _condition_values(rule, "card_type") == [expected_type], f"{text}: card_type mismatch"
+        assert rule.percentage == expected_pct, f"{text}: percentage {rule.percentage} != {expected_pct}"
+        if expected_network:
+            expected_value = expected_network[0] if len(expected_network) == 1 else sorted(expected_network)
+            assert _condition_values(rule, "card_network") == [expected_value], f"{text}: card_network mismatch"
+
+
+def test_radar_product_feature() -> None:
+    """Radar variants with different section headings get distinct product_feature conditions."""
+    ml = PricingEntry(
+        entry_id="radar-ml",
+        source_text="0.05% per transaction",
+        source_url="https://stripe.com/us/pricing",
+        section_path=["Radar", "Radar’s machine learning"],
+    )
+    fraud_teams = PricingEntry(
+        entry_id="radar-fraud",
+        source_text="0.07% per transaction",
+        source_url="https://stripe.com/us/pricing",
+        section_path=["Radar", "Radar for Fraud Teams"],
+    )
+    rules, _ = classify_entries([ml, fraud_teams], account_country="US")
+    ml_rule = next((r for r in rules if _condition_values(r, "product_feature") == ["machine_learning"]), None)
+    fraud_rule = next((r for r in rules if _condition_values(r, "product_feature") == ["fraud_teams"]), None)
+    assert ml_rule is not None, "machine learning Radar rule not found"
+    assert fraud_rule is not None, "fraud teams Radar rule not found"
+    assert ml_rule.percentage == "0.05"
+    assert fraud_rule.percentage == "0.07"
+    for rule in [ml_rule, fraud_rule]:
+        assert rule.classification_status == "calculable_rule"
+
+
+def test_marketing_statistic_is_ignored() -> None:
+    """Platform marketing numbers like uptime percentages are not fee rules."""
+    entry = PricingEntry(
+        entry_id="uptime",
+        source_text="99.999% average historical uptime",
+        source_url="https://stripe.com/us/pricing",
+        section_path=["Security, reliability and compliance"],
+    )
+    rules, unclassified = classify_entries([entry], account_country="US")
+    assert not rules, "marketing statistic should not produce a rule"
+    assert any(e.classification_status == "ignored_non_fee" for e in unclassified), "expected ignored_non_fee status"
+    coverage = derive_market_fees([entry], account_country="US")[3]
+    assert coverage.dropped_numeric_entries == 0
+    assert coverage.numeric_fee_candidates == 0
+
+
+def test_subset_duplicate_base_with_cap_is_merged() -> None:
+    """A duplicate base row that is a subset of a base+cap row must not conflict."""
+    entries = [
+        PricingEntry(
+            entry_id="ach-base-1",
+            source_text="ACH Direct Debit 0.8% + $0.30",
+            source_url="https://stripe.com/us/pricing/local-payment-methods",
+            section_path=["Payment methods", "ACH Direct Debit"],
+        ),
+        PricingEntry(
+            entry_id="ach-base-2",
+            source_text="ACH Direct Debit 0.8% + $0.30",
+            source_url="https://stripe.com/us/pricing/local-payment-methods",
+            section_path=["Payment methods", "ACH Direct Debit"],
+        ),
+        PricingEntry(
+            entry_id="ach-cap",
+            source_text="ACH Direct Debit $5.00 cap",
+            source_url="https://stripe.com/us/pricing/local-payment-methods",
+            section_path=["Payment methods", "ACH Direct Debit"],
+        ),
+    ]
+    rules, unclassified = classify_entries(entries, account_country="US")
+    conflict = [r for r in rules if r.classification_status == "conflict"]
+    assert not conflict, f"unexpected conflict: {conflict}"
+    rule = next((r for r in rules if r.classification_status == "calculable_rule"), None)
+    assert rule is not None
+    assert rule.percentage == "0.8"
+    assert rule.fixed_amount == "0.30"
+    assert rule.maximum_amount == "5.00"

@@ -149,6 +149,9 @@ def _validate_publication(output_dir: Path) -> list[str]:
         dropped = coverage.get("dropped_numeric_entries", 0)
         if dropped:
             errors.append(f"{path.name}: dropped {dropped} numeric source entries")
+        blocking_conflicts = coverage.get("blocking_fee_conflicts", 0)
+        if blocking_conflicts:
+            errors.append(f"{path.name}: {blocking_conflicts} blocking fee conflict(s) remain unresolved")
         rules = data.get("derived_rules", [])
         # Detect a silent first-value-wins or partial conflict situation:
         # a selector may not simultaneously publish authoritative and conflict
