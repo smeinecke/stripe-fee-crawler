@@ -1,6 +1,9 @@
 # Makefile for stripe-fee-crawler
 
-.PHONY: all format check validate test test-unit test-live regenerate regenerate-strict help
+CACHE_DIR ?= $(if $(XDG_CACHE_HOME),$(XDG_CACHE_HOME),$(HOME)/.cache)/stripe-fee-crawler/http
+CACHE_TTL_HOURS ?= 24
+
+.PHONY: all format check validate test test-unit test-live regenerate regenerate-strict regenerate-refresh help
 
 all: validate test-unit
 
@@ -35,10 +38,13 @@ test-live:
 	uv run pytest tests/ -m live
 
 regenerate:
-	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20
+	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --cache-dir "$(CACHE_DIR)" --cache-ttl-hours "$(CACHE_TTL_HOURS)"
 
 regenerate-strict:
-	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --fail-on-regression
+	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --fail-on-regression --cache-dir "$(CACHE_DIR)" --cache-ttl-hours "$(CACHE_TTL_HOURS)"
+
+regenerate-refresh:
+	uv run stripe-fee-crawler crawl --output .. --max-workers 8 --timeout 20 --fail-on-regression --cache-dir "$(CACHE_DIR)" --cache-ttl-hours "$(CACHE_TTL_HOURS)" --refresh-cache
 
 validate: format check pyright bandit
 	@echo "Validation passed."
@@ -58,5 +64,6 @@ help:
 	@echo "  test-live     - Run live integration tests"
 	@echo "  regenerate    - Regenerate all market data"
 	@echo "  regenerate-strict - Regenerate all market data and fail on regression"
+	@echo "  regenerate-refresh - Regenerate all market data, force cache refresh"
 	@echo "  validate      - Run all validation checks"
 	@echo "  help          - Show this help message"

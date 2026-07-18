@@ -266,7 +266,8 @@ async def test_no_store_response_is_not_cached(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_cache_directive_triggers_revalidation(tmp_path: Path) -> None:
+async def test_no_cache_directive_does_not_force_revalidation(tmp_path: Path) -> None:
+    """A fresh entry with an origin ``no-cache`` directive is served from the snapshot TTL."""
     from stripe_fee_crawler.http_cache import _cache_key
 
     cache_dir = tmp_path
@@ -298,6 +299,52 @@ async def test_no_cache_directive_triggers_revalidation(tmp_path: Path) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append({"url": str(request.url), "headers": dict(request.headers)})
+        return httpx.Response(200, content=b"<html>should not be used</html>")
+
+    transport = httpx.MockTransport(handler)
+    config = CrawlConfiguration(max_workers=1, request_delay=0.0, cache_dir=str(cache_dir))
+    client = HttpClient(config, transport=transport)
+
+    response = await client.get(url, market="US", locale="en-US")
+    assert response.text == "<html>cached</html>"
+    assert response.from_cache
+    assert len(calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_expired_entry_revalidates_with_etag(tmp_path: Path) -> None:
+    """An entry older than the snapshot TTL is revalidated, and a 304 refreshes it."""
+    from stripe_fee_crawler.http_cache import _cache_key
+
+    cache_dir = tmp_path
+    url = "https://stripe.com/pricing"
+    headers = {"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US"}
+    key = _cache_key("GET", url, "US", "en-US", headers)
+    entry_path = cache_dir / "entries" / key[:2] / f"{key}.json"
+    entry_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "v": "2",
+        "key": key,
+        "url": url,
+        "final_url": url,
+        "status_code": 200,
+        "headers": {"content-type": "text/html"},
+        "content": base64.b64encode(b"<html>cached</html>").decode("ascii"),
+        "etag": '"abc"',
+        "last_modified": None,
+        "fetched_at": time.time() - 25 * 3600,
+        "market": "US",
+        "locale": "en-US",
+        "detected_market": "US",
+        "detected_locale": "en-US",
+        "cache_control": None,
+    }
+    entry_path.write_text(json.dumps(entry, ensure_ascii=False, sort_keys=True), encoding="utf-8")
+
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append({"url": str(request.url), "headers": dict(request.headers)})
         assert request.headers["if-none-match"] == '"abc"'
         return httpx.Response(304, headers={"etag": '"abc"'})
 
@@ -309,6 +356,8 @@ async def test_no_cache_directive_triggers_revalidation(tmp_path: Path) -> None:
     assert response.text == "<html>cached</html>"
     assert response.from_cache
     assert len(calls) == 1
+    data = json.loads(entry_path.read_text(encoding="utf-8"))
+    assert float(data["fetched_at"]) > entry["fetched_at"]
 
 
 @pytest.mark.asyncio

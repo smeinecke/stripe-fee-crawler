@@ -117,12 +117,16 @@ class CacheStats(BaseModel):
 
     model_config = ConfigDict(extra="ignore", frozen=True)
 
+    cache_enabled: bool = False
+    cache_dir: str | None = None
+    cache_ttl_hours: float = 24.0
     cache_hits: int = 0
     cache_misses: int = 0
     cache_revalidations: int = 0
     cache_304_responses: int = 0
     cache_writes: int = 0
     cache_errors: int = 0
+    network_requests: int = 0
     bytes_avoided: int = 0
 
 

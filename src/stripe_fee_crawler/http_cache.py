@@ -33,6 +33,29 @@ logger = logging.getLogger(__name__)
 
 CACHE_VERSION = "2"
 
+
+def _default_cache_dir() -> Path:
+    """Return the persistent default cache directory.
+
+    Resolves ``${XDG_CACHE_HOME:-$HOME/.cache}/stripe-fee-crawler/http``,
+    expanding both ``~`` and environment variables.
+    """
+    xdg_cache = os.environ.get("XDG_CACHE_HOME")
+    if xdg_cache:
+        base = os.path.expandvars(os.path.expanduser(xdg_cache))
+    else:
+        home = os.environ.get("HOME") or os.path.expanduser("~")
+        base = os.path.join(os.path.expandvars(os.path.expanduser(home)), ".cache")
+    return Path(base) / "stripe-fee-crawler" / "http"
+
+
+def _resolve_cache_dir(cache_dir: str | None) -> Path | None:
+    """Resolve a cache directory string, defaulting to the persistent XDG path."""
+    if cache_dir:
+        return Path(os.path.expandvars(os.path.expanduser(cache_dir)))
+    return _default_cache_dir()
+
+
 # Content-negotiation headers that can change which market/language is served.
 _NEGOTIATION_HEADERS = {"accept", "accept-language", "accept-encoding", "accept-charset"}
 
@@ -253,20 +276,18 @@ class HttpCache:
 
     def __init__(self, config: CrawlConfiguration) -> None:
         self.config = config
-        self.stats = CacheStats()
-        if config.cache_dir is not None and not config.no_cache:
-            self._enabled = True
-            self._cache_dir: Path | None = Path(config.cache_dir)
-        else:
-            self._enabled = False
-            self._cache_dir = None
+        self._configured_dir = _resolve_cache_dir(config.cache_dir)
+        self._enabled = self._configured_dir is not None and not config.no_cache
+        self._cache_dir = self._configured_dir if self._enabled else None
         self._ttl_seconds = config.cache_ttl_hours * 3600.0
         self._refresh = config.refresh_cache
         self._key_locks: dict[str, asyncio.Lock] = {}
         self._file_locks: dict[str, _FileLock] = {}
-
-        if self._cache_dir is not None:
-            self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self.stats = CacheStats(
+            cache_enabled=self._enabled,
+            cache_dir=str(self._configured_dir) if self._configured_dir else None,
+            cache_ttl_hours=config.cache_ttl_hours,
+        )
 
     def _key(self, method: str, url: str, market: str | None, locale: str | None, headers: dict[str, str]) -> str:
         return _cache_key(method, url, market, locale, headers)
@@ -310,31 +331,35 @@ class HttpCache:
         return not (requested_country and cached_country and requested_country != cached_country)
 
     def _is_fresh(self, entry: _CacheEntry) -> bool:
-        """Return True if the stored entry may be served without revalidation."""
+        """Return True if the stored entry may be served without revalidation.
+
+        The crawler's configured snapshot TTL controls reuse for public pricing
+        pages. Origin ``no-cache`` or ``max-age=0`` directives are intentionally
+        ignored so that repeated regenerations within the TTL do not revalidate
+        on every run. A positive ``max-age`` shorter than the snapshot TTL is
+        respected as an upper bound.
+        """
         directives = _parse_cache_control(entry.cache_control)
 
-        # no-cache means the stored response must be revalidated before reuse.
-        if "no-cache" in directives:
-            return False
-
-        # max-age (or shared-cache s-maxage) determines freshness in seconds.
+        # max-age (or shared-cache s-maxage) is an upper bound on freshness.
         max_age_value = directives.get("s-maxage") or directives.get("max-age")
         if max_age_value is not None:
             try:
                 max_age = int(max_age_value)
             except ValueError:
                 max_age = None
-            if max_age is not None:
-                if max_age == 0:
-                    return False
+            if max_age and max_age > 0:
                 return (time.time() - entry.fetched_at) < min(max_age, self._ttl_seconds)
 
-        # Fall back to Expires if no Cache-Control max-age is present.
+        # Fall back to Expires if it is later than now and within the TTL.
         expires = entry.headers.get("expires")
         if expires:
             try:
                 expires_dt = parsedate_to_datetime(expires)
-                return time.time() < expires_dt.timestamp()
+                expires_ts = expires_dt.timestamp()
+                now = time.time()
+                if now < expires_ts and (now - entry.fetched_at) < self._ttl_seconds:
+                    return True
             except Exception:  # nosec B110
                 pass
 
@@ -415,14 +440,18 @@ class HttpCache:
         if locale:
             request_headers["Accept-Language"] = locale
 
+        async def _do_network(req_headers: dict[str, str], reval_headers: dict[str, str]) -> httpx.Response:
+            self.stats = self.stats.model_copy(update={"network_requests": self.stats.network_requests + 1})
+            return await network(req_headers, reval_headers)
+
         if method.upper() != "GET":
             reval = self._revalidation_headers(None)
-            response = await network(request_headers, reval)
+            response = await _do_network(request_headers, reval)
             return response, False
 
         if not self._enabled:
             reval = self._revalidation_headers(None)
-            response = await network(request_headers, reval)
+            response = await _do_network(request_headers, reval)
             return response, False
 
         key = self._key(method, url, market, locale, request_headers)
@@ -460,7 +489,7 @@ class HttpCache:
                     )
                     logger.debug("Cache revalidation for %s", _normalize_url(url))
 
-                response = await network(request_headers, reval)
+                response = await _do_network(request_headers, reval)
 
                 if response.status_code == 304:
                     if entry is not None:

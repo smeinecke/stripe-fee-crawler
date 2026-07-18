@@ -71,9 +71,11 @@ def _config_from_options(
         cache_dir=cache_dir or _env_default("STRIPE_FEE_CRAWLER_CACHE_DIR"),
         cache_ttl_hours=cache_ttl_hours
         if cache_ttl_hours is not None
-        else float(_env_default("STRIPE_FEE_CRAWLER_CACHE_TTL_HOURS") or "24"),
-        no_cache=no_cache or bool(_env_default("STRIPE_FEE_CRAWLER_NO_CACHE")),
-        refresh_cache=refresh_cache or bool(_env_default("STRIPE_FEE_CRAWLER_REFRESH_CACHE")),
+        else _env_float("STRIPE_FEE_CRAWLER_CACHE_TTL_HOURS", 24.0),
+        no_cache=no_cache
+        or _parse_env_bool("STRIPE_FEE_CRAWLER_NO_CACHE", _env_default("STRIPE_FEE_CRAWLER_NO_CACHE")),
+        refresh_cache=refresh_cache
+        or _parse_env_bool("STRIPE_FEE_CRAWLER_REFRESH_CACHE", _env_default("STRIPE_FEE_CRAWLER_REFRESH_CACHE")),
     )
 
 
@@ -82,6 +84,33 @@ def _env_default(name: str) -> str | None:
     import os
 
     return os.environ.get(name) or None
+
+
+def _parse_env_bool(name: str, value: str | None) -> bool:
+    """Parse a strict true/false environment variable value.
+
+    true:  1, true, yes, on
+    false: 0, false, no, off, empty/unset
+    """
+    if value is None:
+        return False
+    lowered = value.strip().lower()
+    if lowered in {"", "0", "false", "no", "off"}:
+        return False
+    if lowered in {"1", "true", "yes", "on"}:
+        return True
+    raise ConfigurationError(f"Invalid boolean value for {name}: {value!r}")
+
+
+def _env_float(name: str, default: float) -> float:
+    """Return a float parsed from an environment variable, or ``default``."""
+    value = _env_default(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ConfigurationError(f"Invalid numeric value for {name}: {value!r}") from exc
 
 
 @main.command(name="discover-markets")
