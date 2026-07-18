@@ -490,7 +490,7 @@ def _label_references_component(
                         try:
                             if Decimal(normalised) == amount_dec:
                                 return True
-                        except Exception:
+                        except Exception:  # nosec B110
                             pass
                 else:
                     if Decimal(candidate) == amount_dec:

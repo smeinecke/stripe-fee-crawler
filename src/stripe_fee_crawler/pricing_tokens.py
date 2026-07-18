@@ -186,10 +186,7 @@ def _parse_decimal(text: str) -> Decimal | None:
 
     # When both separators are present, the rightmost is the decimal mark.
     if last_dot != -1 and last_comma != -1:
-        if last_dot > last_comma:
-            text = text.replace(",", "")
-        else:
-            text = text.replace(".", "").replace(",", ".")
+        text = text.replace(",", "") if last_dot > last_comma else text.replace(".", "").replace(",", ".")
         try:
             return Decimal(text)
         except InvalidOperation:
@@ -200,11 +197,7 @@ def _parse_decimal(text: str) -> Decimal | None:
 
     # Recognize thousands groupings: every group except the first has exactly
     # three digits and the first has one to three digits.
-    if (
-        all(p.isdigit() for p in parts)
-        and 1 <= len(parts[0]) <= 3
-        and all(len(p) == 3 for p in parts[1:])
-    ):
+    if all(p.isdigit() for p in parts) and 1 <= len(parts[0]) <= 3 and all(len(p) == 3 for p in parts[1:]):
         try:
             return Decimal("".join(parts))
         except InvalidOperation:

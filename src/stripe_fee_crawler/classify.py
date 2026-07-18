@@ -565,9 +565,7 @@ def _fee_evidence_for_group(
     # Trust a heading/section_path or the source text itself when it already
     # contains a percentage or amount next to a known payment method token.
     amount_patterns = r"(?:\d\s*%|[A-Za-z]?[€£$¥₹₩]\s*\d|\d\s*[€£$¥₹₩])"
-    method_pattern_tokens = sorted(
-        set(_PAYMENT_METHOD_TOKENS) | set(_CARD_NETWORK_TOKENS), key=len, reverse=True
-    )
+    method_pattern_tokens = sorted(set(_PAYMENT_METHOD_TOKENS) | set(_CARD_NETWORK_TOKENS), key=len, reverse=True)
     method_pattern = r"\b(" + "|".join(re.escape(m.replace("_", " ")) for m in method_pattern_tokens) + r")\b"
     text_or_path = (
         " ".join(p.lower() for p in base_entry.section_path if p)
@@ -913,9 +911,7 @@ def _is_unsupported_multi_per_shape(entry: PricingEntry, unit: str | None) -> bo
     # Capture up to three words after each "per" to distinguish repeated units
     # ("per successful charge ... per successful charge") from stacked
     # dimensions ("per institution per account holder per month").
-    per_phrases = re.findall(
-        r"\bper\b\s+((?:(?!\bper\b)[a-z0-9]+\s+){0,2}(?!\bper\b)[a-z0-9]+)", text
-    )
+    per_phrases = re.findall(r"\bper\b\s+((?:(?!\bper\b)[a-z0-9]+\s+){0,2}(?!\bper\b)[a-z0-9]+)", text)
     per_phrases = [p.strip() for p in per_phrases]
     if len(per_phrases) >= 3 and len(set(per_phrases)) > 1:
         return True
@@ -941,9 +937,7 @@ def _looks_like_price_line(line: str) -> bool:
     currency_parts = sorted(set(CURRENCY_CODES) | set(CURRENCY_SYMBOLS), key=len, reverse=True)
     currency_pattern = "|".join(re.escape(c) for c in currency_parts)
     price_pattern = rf"(?i)^\s*(?:{currency_pattern})?\s*[\d\s,.]*\s*(?:{currency_pattern})?\s*(?:per)?\s*$"
-    if re.fullmatch(price_pattern, stripped):
-        return True
-    return False
+    return bool(re.fullmatch(price_pattern, stripped))
 
 
 def _heading_to_snake_case(heading: str) -> str:
@@ -1248,9 +1242,8 @@ def _infer_product_id(entry: PricingEntry) -> str:
         return "custom_domain"
     if _text_has(combined, "post-payment invoice", "post payment invoice"):
         return "post_payment_invoice"
-    if (
-        _text_has(combined, "adaptive pricing", "adaptive acceptance", "uplift")
-        or _text_has(combined, "foreign exchange", "fx", "converted amount")
+    if _text_has(combined, "adaptive pricing", "adaptive acceptance", "uplift") or _text_has(
+        combined, "foreign exchange", "fx", "converted amount"
     ):
         return "adaptive_pricing"
     if _text_has(combined, "invoic"):
@@ -2736,7 +2729,8 @@ def _is_marketing_or_statistical(entry: PricingEntry) -> bool:
         or "of subscription volume" in text
         or "of customers" in text
         or "tapped into" in text
-        or "increased" in text and "with stripe" in text
+        or "increased" in text
+        and "with stripe" in text
         or "learn why" in text
         or "read the docs" in text
         or "customers use stripe" in text
@@ -2866,11 +2860,17 @@ def _calculator_coverage_status(
     # If any remaining unclassified entry has a numeric fee value, coverage is partial.
     # Custom-priced, included/free, and explicitly unsupported-shape entries are
     # considered resolved.
-    resolved_unclassified_statuses = {IGNORED_NON_FEE, INFORMATIONAL, REFERENCE_ONLY, CUSTOM_PRICING, INCLUDED, FREE, UNSUPPORTED_SHAPE}
+    resolved_unclassified_statuses = {
+        IGNORED_NON_FEE,
+        INFORMATIONAL,
+        REFERENCE_ONLY,
+        CUSTOM_PRICING,
+        INCLUDED,
+        FREE,
+        UNSUPPORTED_SHAPE,
+    }
     numeric_unclassified = [
-        e
-        for e in unclassified
-        if _has_base_fee(e) and e.classification_status not in resolved_unclassified_statuses
+        e for e in unclassified if _has_base_fee(e) and e.classification_status not in resolved_unclassified_statuses
     ]
     if numeric_unclassified:
         return "partial"
