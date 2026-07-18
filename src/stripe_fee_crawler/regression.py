@@ -18,12 +18,50 @@ def _load_json(path: Path) -> Any:
         return json.load(fh)
 
 
+def _country_code(item: dict[str, Any]) -> str | None:
+    code = item.get("account_country") or item.get("stripe_market_code")
+    if code:
+        return code.upper()
+    return None
+
+
 def _market_set(data_dir: Path) -> set[str]:
+    """Return the full set of discovered market country codes."""
+    manifest_path = data_dir / "meta" / "markets.json"
+    if manifest_path.exists():
+        manifest = _load_json(manifest_path)
+        codes: set[str] = set()
+        for item in manifest.get("markets", []):
+            code = _country_code(item)
+            if code:
+                codes.add(code)
+        for item in manifest.get("unsupported", []):
+            code = _country_code(item)
+            if code:
+                codes.add(code)
+        for item in manifest.get("transient_failures", []):
+            code = _country_code(item)
+            if code:
+                codes.add(code)
+        return codes
+    # Fallback for older/test repositories without a manifest.
+    return _supported_set(data_dir) | _unsupported_set(data_dir) | _transient_set(data_dir)
+
+
+def _supported_set(data_dir: Path) -> set[str]:
+    """Return country codes of supported markets with a fee page."""
     index_path = data_dir / "json" / "index.json"
     if not index_path.exists():
         return set()
     index = _load_json(index_path)
-    return {entry["account_country"] for entry in index.get("markets", [])}
+    codes: set[str] = set()
+    for entry in index.get("markets", []):
+        status = entry.get("derivation_status")
+        if status in {"complete", "partial"}:
+            code = entry.get("account_country")
+            if code:
+                codes.add(code.upper())
+    return codes
 
 
 def _unsupported_set(data_dir: Path) -> set[str]:
@@ -31,7 +69,15 @@ def _unsupported_set(data_dir: Path) -> set[str]:
     if not path.exists():
         return set()
     data = _load_json(path)
-    return {item.get("stripe_market_code", item.get("account_country")) for item in data}
+    return {code for item in data if (code := _country_code(item))}
+
+
+def _transient_set(data_dir: Path) -> set[str]:
+    path = data_dir / "meta" / "transient-failures.json"
+    if not path.exists():
+        return set()
+    data = _load_json(path)
+    return {code for item in data if (code := _country_code(item))}
 
 
 def _market_data(data_dir: Path, country: str) -> dict[str, Any]:
@@ -86,8 +132,10 @@ def _detect_changes(old_dir: Path, new_dir: Path, thresholds: dict[str, Any] | N
 
     old_markets = _market_set(old_dir)
     new_markets = _market_set(new_dir)
-    old_unsupported = _unsupported_set(old_dir)
+    old_supported = _supported_set(old_dir)
+    new_supported = _supported_set(new_dir)
     new_unsupported = _unsupported_set(new_dir)
+    new_transient = _transient_set(new_dir)
 
     removed = old_markets - new_markets
     added = new_markets - old_markets
@@ -246,15 +294,32 @@ def _detect_changes(old_dir: Path, new_dir: Path, thresholds: dict[str, Any] | N
                 )
             seen_ids.add(rule_id)
 
-    # Compare unsupported market transitions.
-    for code in sorted(old_unsupported - new_unsupported):
-        changes.append(
-            ChangeType(
-                kind="supported_to_unsupported",
-                identifier=code,
-                message=f"{code} moved from supported to unsupported",
+    # Compare supported-to-unsupported/transient transitions.
+    for code in sorted(old_supported - new_supported):
+        if code in new_unsupported:
+            changes.append(
+                ChangeType(
+                    kind="supported_to_unsupported",
+                    country_code=code,
+                    message=f"{code} moved from supported to unsupported",
+                )
             )
-        )
+        elif code in new_transient:
+            changes.append(
+                ChangeType(
+                    kind="supported_to_transient",
+                    country_code=code,
+                    message=f"{code} moved from supported to transient failure",
+                )
+            )
+        elif code not in new_markets:
+            changes.append(
+                ChangeType(
+                    kind="discovered_to_missing",
+                    country_code=code,
+                    message=f"{code} disappeared from the discovered market set",
+                )
+            )
 
     return changes
 

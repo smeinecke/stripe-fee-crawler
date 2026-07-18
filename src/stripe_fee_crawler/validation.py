@@ -15,8 +15,10 @@ from pydantic import ValidationError
 from .exceptions import ValidationError as CrawlerValidationError
 from .market_detection import _detect_market_from_path
 from .models import (
+    ChangeReport,
     CoreFeeRule,
     CoreFees,
+    CrawlReport,
     FeeComponent,
     FeeCondition,
     MarketIndex,
@@ -24,6 +26,7 @@ from .models import (
     MarketOutput,
     PaymentMethodCatalog,
     SchemaVersionInfo,
+    UnsupportedMarket,
 )
 from .pricing_tokens import currency_exponent
 
@@ -190,14 +193,26 @@ def _validate_publication(output_dir: Path) -> list[str]:
         errors.append("derived rules exist but core-fees.json contains no calculable rules")
 
     change_report_path = output_dir / "change-report.json"
-    if change_report_path.exists():
+    if not change_report_path.exists():
+        errors.append("change-report.json is missing")
+    else:
         try:
             with open(change_report_path, encoding="utf-8") as fh:
-                change_report = json.load(fh)
-            if change_report.get("has_regression"):
+                change_report = ChangeReport.model_validate(json.load(fh))
+            if change_report.has_regression:
                 errors.append("change-report.json has_regression is true")
         except Exception as exc:
-            errors.append(f"change-report.json: cannot read: {exc}")
+            errors.append(f"change-report.json: not a valid ChangeReport: {exc}")
+
+    crawl_report_path = output_dir / "meta" / "crawl-report.json"
+    if not crawl_report_path.exists():
+        errors.append("meta/crawl-report.json is missing")
+    else:
+        try:
+            with open(crawl_report_path, encoding="utf-8") as fh:
+                CrawlReport.model_validate(json.load(fh))
+        except Exception as exc:
+            errors.append(f"meta/crawl-report.json: not a valid CrawlReport: {exc}")
 
     crawler_revision_path = output_dir / "meta" / "crawler-revision.json"
     if crawler_revision_path.exists():
@@ -216,6 +231,17 @@ def _validate_publication(output_dir: Path) -> list[str]:
             f"crawler submodule revision {submodule_revision[:12]} does not match "
             f"generated revision {crawler_revision[:12]}"
         )
+
+    # README metrics must be consistent with the generated artifacts.
+    readme_path = output_dir / "README.md"
+    if not readme_path.exists():
+        errors.append("README.md is missing")
+    else:
+        try:
+            readme_text = readme_path.read_text(encoding="utf-8")
+            _validate_readme_metrics(readme_text, output_dir, errors)
+        except Exception as exc:
+            errors.append(f"README.md: cannot validate: {exc}")
 
     return errors
 
@@ -1053,6 +1079,230 @@ def validate_semantic(
     return {"success": True, "errors": errors}
 
 
+def _country_code_from_item(item: dict[str, Any]) -> str | None:
+    code = item.get("account_country") or item.get("stripe_market_code")
+    if code:
+        return code.upper()
+    return None
+
+
+def _load_json_list(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    try:
+        data = json.load(path.open(encoding="utf-8"))
+    except Exception:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return data.get("markets", []) or data.get("items", [])
+    return []
+
+
+def _validate_readme_metrics(readme_text: str, output_dir: Path, errors: list[str]) -> None:
+    def _readme_int(pattern: str) -> int | None:
+        m = re.search(pattern, readme_text)
+        if not m:
+            return None
+        return int(m.group(1).replace(",", ""))
+
+    core_fees_path = output_dir / "json" / "core-fees.json"
+    core_rule_count = 0
+    if core_fees_path.exists():
+        try:
+            core_fees = validate_core_fees(json.load(core_fees_path.open(encoding="utf-8")))
+            core_rule_count = sum(len(m.rules) for m in core_fees.markets)
+        except Exception as exc:
+            errors.append(f"core-fees.json: cannot count rules for README check: {exc}")
+
+    readme_rules = _readme_int(r"\|\s*Core fee rules\s*\|\s*\*\*(\d[\d,]*)\*\*\s*\|")
+    if readme_rules is not None and readme_rules != core_rule_count:
+        errors.append(f"README core fee rules ({readme_rules}) does not match core-fees.json ({core_rule_count})")
+
+    manifest_path = output_dir / "meta" / "markets.json"
+    unsupported_path = output_dir / "meta" / "unsupported-markets.json"
+    transient_path = output_dir / "meta" / "transient-failures.json"
+
+    all_markets: set[str] = set()
+    for item in _load_json_list(manifest_path):
+        code = _country_code_from_item(item)
+        if code:
+            all_markets.add(code)
+    for item in _load_json_list(unsupported_path):
+        code = _country_code_from_item(item)
+        if code:
+            all_markets.add(code)
+    for item in _load_json_list(transient_path):
+        code = _country_code_from_item(item)
+        if code:
+            all_markets.add(code)
+
+    unsupported_count = len(_load_json_list(unsupported_path))
+    transient_count = len(_load_json_list(transient_path))
+
+    readme_markets = _readme_int(r"\|\s*Markets\s*\|\s*\*\*(\d[\d,]*)\*\*\s*\|")
+    if readme_markets is not None and readme_markets != len(all_markets):
+        errors.append(
+            f"README market count ({readme_markets}) does not match discovered market count ({len(all_markets)})"
+        )
+
+    readme_unsupported = _readme_int(r"\|\s*Unsupported markets\s*\|\s*(\d[\d,]*)\s*\|")
+    if readme_unsupported is not None and readme_unsupported != unsupported_count:
+        errors.append(
+            f"README unsupported count ({readme_unsupported}) does not match unsupported-markets.json ({unsupported_count})"
+        )
+
+    readme_transient = _readme_int(r"\|\s*Transient failures\s*\|\s*(\d[\d,]*)\s*\|")
+    if readme_transient is not None and readme_transient != transient_count:
+        errors.append(
+            f"README transient count ({readme_transient}) does not match transient-failures.json ({transient_count})"
+        )
+
+
+def _validate_completeness(output_dir: Path) -> list[str]:
+    """Verify that every discovered market is in exactly one supported/unsupported/transient state."""
+    errors: list[str] = []
+
+    manifest_path = output_dir / "meta" / "markets.json"
+    index_path = output_dir / "json" / "index.json"
+    core_fees_path = output_dir / "json" / "core-fees.json"
+    unsupported_path = output_dir / "meta" / "unsupported-markets.json"
+    transient_path = output_dir / "meta" / "transient-failures.json"
+
+    manifest: MarketManifest | None = None
+    if manifest_path.exists():
+        try:
+            manifest = validate_manifest(json.load(manifest_path.open(encoding="utf-8")))
+        except Exception as exc:
+            errors.append(f"markets.json: cannot validate: {exc}")
+
+    index: MarketIndex | None = None
+    if index_path.exists():
+        try:
+            index = validate_index(json.load(index_path.open(encoding="utf-8")))
+        except Exception as exc:
+            errors.append(f"index.json: cannot validate: {exc}")
+
+    core_fees: CoreFees | None = None
+    if core_fees_path.exists():
+        try:
+            core_fees = validate_core_fees(json.load(core_fees_path.open(encoding="utf-8")))
+        except Exception as exc:
+            errors.append(f"core-fees.json: cannot validate: {exc}")
+
+    unsupported: list[UnsupportedMarket] = []
+    if unsupported_path.exists():
+        try:
+            unsupported = [
+                UnsupportedMarket.model_validate(item) for item in json.load(unsupported_path.open(encoding="utf-8"))
+            ]
+        except Exception as exc:
+            errors.append(f"unsupported-markets.json: cannot validate: {exc}")
+
+    transient: list[UnsupportedMarket] = []
+    if transient_path.exists():
+        try:
+            transient = [
+                UnsupportedMarket.model_validate(item) for item in json.load(transient_path.open(encoding="utf-8"))
+            ]
+        except Exception as exc:
+            errors.append(f"transient-failures.json: cannot validate: {exc}")
+
+    discovered: dict[str, str] = {}
+    if manifest:
+        for market in manifest.markets:
+            discovered[market.account_country] = "manifest"
+        for item in manifest.unsupported:
+            if item.account_country:
+                discovered.setdefault(item.account_country, "manifest_unsupported")
+        for item in manifest.transient_failures:
+            if item.account_country:
+                discovered.setdefault(item.account_country, "manifest_transient")
+    for item in unsupported:
+        if item.account_country:
+            discovered.setdefault(item.account_country, "unsupported_file")
+    for item in transient:
+        if item.account_country:
+            discovered.setdefault(item.account_country, "transient_file")
+    if index:
+        for entry in index.markets:
+            discovered.setdefault(entry.account_country, "index")
+
+    supported_by_index: dict[str, Any] = {}
+    if index:
+        for entry in index.markets:
+            supported_by_index[entry.account_country] = entry
+
+    unsupported_set = {u.account_country for u in unsupported if u.account_country}
+    transient_set = {t.account_country for t in transient if t.account_country}
+    core_by_country: dict[str, Any] = {}
+    if core_fees:
+        for entry in core_fees.markets:
+            core_by_country[entry.account_country] = entry
+
+    for country in sorted(discovered):
+        states: list[str] = []
+        in_index = country in supported_by_index
+        in_core = country in core_by_country
+        in_unsupported = country in unsupported_set
+        in_transient = country in transient_set
+        if in_index:
+            states.append("supported")
+        if in_unsupported:
+            states.append("unsupported")
+        if in_transient:
+            states.append("transient")
+        if len(states) != 1:
+            errors.append(f"{country}: expected exactly one state, got {states}")
+            continue
+
+        state = states[0]
+        if state == "supported":
+            entry = supported_by_index[country]
+            if entry.derivation_status != "complete" or entry.calculator_coverage_status != "complete":
+                errors.append(
+                    f"{country}: supported market is not complete "
+                    f"({entry.derivation_status}/{entry.calculator_coverage_status})"
+                )
+            if not in_core:
+                errors.append(f"{country}: supported market is missing from core-fees.json")
+            else:
+                core = core_by_country[country]
+                if core.derivation_status != entry.derivation_status:
+                    errors.append(
+                        f"{country}: derivation_status mismatch between index ({entry.derivation_status}) "
+                        f"and core-fees ({core.derivation_status})"
+                    )
+                if core.calculator_coverage_status != entry.calculator_coverage_status:
+                    errors.append(
+                        f"{country}: calculator_coverage_status mismatch between index ({entry.calculator_coverage_status}) "
+                        f"and core-fees ({core.calculator_coverage_status})"
+                    )
+        elif state == "unsupported":
+            record = next((u for u in unsupported if u.account_country == country), None)
+            if record and not record.requested_urls and not isinstance(record.requested_urls, list):
+                errors.append(f"{country}: unsupported record requested_urls must be a list")
+            if record and not record.reason:
+                errors.append(f"{country}: unsupported record must have a reason")
+        elif state == "transient":
+            record = next((t for t in transient if t.account_country == country), None)
+            if record and not record.reason:
+                errors.append(f"{country}: transient record must have a reason")
+
+    for country in sorted(core_by_country):
+        if country not in supported_by_index:
+            errors.append(f"{country}: core-fees.json market {country} is not in index.json")
+        if country in unsupported_set or country in transient_set:
+            errors.append(f"{country}: core-fees.json market is also listed as unsupported/transient")
+
+    for country in sorted(supported_by_index):
+        if country not in discovered:
+            errors.append(f"{country}: index.json market {country} is not in the discovered market set")
+
+    return errors
+
+
 def validate_data_repository(
     data_repo_dir: str | Path,
     strict: bool = True,
@@ -1061,21 +1311,8 @@ def validate_data_repository(
     """Validate the contents of the stripe-fee-data repository."""
     result = validate_all_output(Path(data_repo_dir), strict=strict, semantic=True)
     if require_all_complete and result["success"]:
-        core_fees_path = Path(data_repo_dir) / "json" / "core-fees.json"
-        if core_fees_path.exists():
-            with open(core_fees_path, encoding="utf-8") as fh:
-                core_fees = CoreFees.model_validate(json.load(fh))
-            for entry in core_fees.markets:
-                if entry.derivation_status not in {"complete"}:
-                    result["errors"].append(
-                        f"{entry.account_country}: derivation_status is {entry.derivation_status!r}"
-                    )
-                if entry.calculator_coverage_status not in {"complete"}:
-                    result["errors"].append(
-                        f"{entry.account_country}: calculator_coverage_status is {entry.calculator_coverage_status!r}"
-                    )
-        else:
-            result["errors"].append("core-fees.json not found; cannot verify completeness")
+        completeness_errors = _validate_completeness(Path(data_repo_dir))
+        result["errors"].extend(completeness_errors)
         result["success"] = not result["errors"]
         if strict and result["errors"]:
             raise CrawlerValidationError("Repository completeness check failed:\n" + "\n".join(result["errors"]))

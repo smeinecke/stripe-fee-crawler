@@ -522,6 +522,7 @@ class MarketOutput(BaseModel):
     coverage_summary: CoverageSummary = Field(default_factory=CoverageSummary)
     transient_failure: bool = False
     unsupported_reason: str | None = None
+    requested_urls: list[str] = Field(default_factory=list)
 
     @field_validator("derivation_status")
     @classmethod
@@ -583,18 +584,15 @@ class UnsupportedMarket(BaseModel):
     stripe_market_code: str
     account_country: str | None = None
     country_name: str | None = None
-    tested_urls: list[str] = Field(default_factory=list)
+    requested_urls: list[str] = Field(default_factory=list)
     reason: str | None = None
     status: str = "unsupported"
-    first_confirmed_at: str | None = None
-    last_confirmed_at: str | None = None
-    last_status: int | None = None
-    temporary: bool = False
+    checked_at: str | None = None
 
     @field_validator("status")
     @classmethod
     def _status_allowed(cls, value: str) -> str:
-        allowed = {"unsupported", "pricing_page_unavailable", "transient_failure"}
+        allowed = {"unsupported", "pricing_page_unavailable", "transient_failure", "explicitly_excluded"}
         if value not in allowed:
             raise ValueError(f"status must be one of {allowed}")
         return value

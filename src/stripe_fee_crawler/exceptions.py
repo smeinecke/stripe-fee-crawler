@@ -113,9 +113,9 @@ class FeePageStructureError(FeePageError):
 class UnsupportedMarketError(CrawlerError):
     """Market has no public merchant fee page."""
 
-    def __init__(self, message: str, tested_urls: list[str] | None = None) -> None:
+    def __init__(self, message: str, requested_urls: list[str] | None = None) -> None:
         super().__init__(message)
-        self.tested_urls = tested_urls or []
+        self.requested_urls = requested_urls or []
 
 
 class ContentSecurityError(CrawlerError):

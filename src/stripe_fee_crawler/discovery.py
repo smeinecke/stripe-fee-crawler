@@ -381,6 +381,7 @@ async def discover_fee_pages(
     payment_methods_url = _payment_methods_url_for(market)
     tested: list[str] = []
     transient_failure = False
+    served_other_market: str | None = None
     pricing_response: HttpResponse | None = None
     pricing_tree: Any | None = None
 
@@ -413,14 +414,23 @@ async def discover_fee_pages(
             continue
 
         if response.detected_market and response.detected_market.upper() != code.upper():
-            logger.warning(
-                "Requested %s but %s served market %s (effective %s); treating as transient",
-                code,
-                url,
-                response.detected_market,
-                response.url,
-            )
-            transient_failure = True
+            if str(response.url).rstrip("/") == url.rstrip("/"):
+                logger.warning(
+                    "Requested %s but %s claims market %s without redirect; treating as transient",
+                    code,
+                    url,
+                    response.detected_market,
+                )
+                transient_failure = True
+            else:
+                logger.warning(
+                    "Requested %s but %s redirected to market %s (effective %s); treating as unsupported",
+                    code,
+                    url,
+                    response.detected_market,
+                    response.url,
+                )
+                served_other_market = response.detected_market
             continue
 
         if url == pricing_url and _is_pricing_page(response, tree):
@@ -434,11 +444,16 @@ async def discover_fee_pages(
                 payment_methods_url = None
 
     if pricing_response is None or not _is_pricing_page(pricing_response, pricing_tree):
+        if served_other_market:
+            raise UnsupportedMarketError(
+                f"Pricing page for {code} redirects to market {served_other_market}",
+                requested_urls=tested,
+            )
         if transient_failure:
             raise FeePageError(f"Could not confirm a pricing page for {code}; transient_failure={transient_failure}")
         raise UnsupportedMarketError(
             f"No public pricing page found for {code}",
-            tested_urls=tested,
+            requested_urls=tested,
         )
 
     return pricing_url, payment_methods_url

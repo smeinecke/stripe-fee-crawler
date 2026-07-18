@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from stripe_fee_crawler.crawler import StripeCrawler
@@ -51,6 +52,30 @@ async def test_crawl_all_publishes(tmp_path: Path) -> None:
     assert report.exit_code == 0
     assert (tmp_path / "json" / "DE.json").exists()
     assert (tmp_path / "json" / "index.json").exists()
+    assert (tmp_path / "change-report.json").exists()
+    assert (tmp_path / "meta" / "crawl-report.json").exists()
+    assert report.changed is True
+
+
+async def test_crawl_all_second_run_unchanged(tmp_path: Path) -> None:
+    config = CrawlConfiguration(
+        markets=["DE"],
+        offline_fixtures={
+            "https://stripe.com/en-de/pricing": "tests/fixtures/de-pricing.html",
+            "https://stripe.com/en-de/pricing/local-payment-methods": "tests/fixtures/de-lpm.html",
+        },
+        request_delay=0.0,
+    )
+    async with StripeCrawler(config) as crawler:
+        outputs, unsupported = await crawler.crawl_all()
+        report1 = await crawler.publish(outputs, unsupported, tmp_path, atomic=True, fail_on_regression=False)
+        report2 = await crawler.publish(outputs, unsupported, tmp_path, atomic=True, fail_on_regression=False)
+    assert report1.changed is True
+    assert report2.changed is False
+    crawl_report_path = tmp_path / "meta" / "crawl-report.json"
+    assert crawl_report_path.exists()
+    crawl_report = json.loads(crawl_report_path.read_text(encoding="utf-8"))
+    assert crawl_report["changed"] is False
 
 
 async def test_crawl_market_unsupported() -> None:

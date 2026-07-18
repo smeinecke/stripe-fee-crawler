@@ -10,10 +10,12 @@ import pytest
 
 from stripe_fee_crawler.exceptions import ValidationError as CrawlerValidationError
 from stripe_fee_crawler.models import (
+    ChangeReport,
     CoreFeeEntry,
     CoreFeeRule,
     CoreFees,
     CoverageSummary,
+    CrawlReport,
     FeeComponent,
     FeeCondition,
     FeeEvidence,
@@ -24,6 +26,7 @@ from stripe_fee_crawler.models import (
     PaymentMethodCatalog,
     PaymentMethodEntry,
     Source,
+    UnsupportedMarket,
 )
 from stripe_fee_crawler.output import OutputPublisher
 from stripe_fee_crawler.validation import (
@@ -34,11 +37,60 @@ from stripe_fee_crawler.validation import (
     generate_payment_methods_schema,
     validate_all_output,
     validate_core_fees,
+    validate_data_repository,
     validate_manifest,
     validate_market_output,
     validate_payment_methods,
     validate_semantic,
 )
+
+
+def _write_minimal_publication_files(
+    data_dir: Path,
+    *,
+    markets: int = 1,
+    unsupported: int = 0,
+    transient: int = 0,
+    rules: int = 0,
+    regions: int = 0,
+) -> None:
+    """Create the reports and README that strict validation now requires."""
+    (data_dir / "meta").mkdir(parents=True, exist_ok=True)
+    (data_dir / "change-report.json").write_text(json.dumps(ChangeReport().model_dump()), encoding="utf-8")
+    (data_dir / "meta" / "crawl-report.json").write_text(json.dumps(CrawlReport().model_dump()), encoding="utf-8")
+    (data_dir / "README.md").write_text(
+        f"""<!-- STATS_START -->
+| Metric | Value |
+|--------|------:|
+| Markets | **{markets}** |
+| Derivation status | — |
+| Core fee rules | **{rules}** |
+| Payment methods | 0 (—) |
+| Regions | {regions} (—) |
+| Unsupported markets | {unsupported} |
+| Transient failures | {transient} |
+| Last crawled | — |
+<!-- STATS_END -->
+""",
+        encoding="utf-8",
+    )
+
+
+def _valid_complete_output(country: str = "DE") -> MarketOutput:
+    market = Market(
+        stripe_market_code=f"en-{country.lower()}",
+        account_country=country,
+        country_name=f"Country {country}",
+        locale=f"en-{country.lower()}",
+        url_prefix=f"https://stripe.com/{country.lower()}",
+        status="supported",
+    )
+    return MarketOutput(
+        market=market,
+        sources=[Source(requested_url=f"https://stripe.com/{country.lower()}/pricing")],
+        derivation_status="complete",
+        calculator_coverage_status="complete",
+    )
 
 
 def test_validate_market_output_valid() -> None:
@@ -76,14 +128,13 @@ def test_validate_all_output(tmp_path: Path) -> None:
     publisher = OutputPublisher(tmp_path, timestamp=None)
     _, staging = publisher.publish([output], [output.market], [], [])
     publisher.commit(staging, validate=False)
+    _write_minimal_publication_files(tmp_path, rules=0)
     result = validate_all_output(tmp_path)
     assert result["success"]
 
 
 def test_strict_validation_fails_on_blocking_fee_conflicts(tmp_path: Path) -> None:
     """Strict validation rejects any market whose coverage summary still reports blocking fee conflicts."""
-    json_dir = tmp_path / "json"
-    json_dir.mkdir()
     market = Market(
         stripe_market_code="en-us",
         account_country="US",
@@ -102,7 +153,10 @@ def test_strict_validation_fails_on_blocking_fee_conflicts(tmp_path: Path) -> No
             blocking_fee_conflicts=1,
         ),
     )
-    (json_dir / "US.json").write_text(json.dumps(output.model_dump()))
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish([output], [market], [], [])
+    publisher.commit(staging, validate=False)
+    _write_minimal_publication_files(tmp_path, rules=0)
     with pytest.raises(CrawlerValidationError) as exc_info:
         validate_all_output(tmp_path, strict=True)
     assert "blocking fee conflict" in str(exc_info.value).lower()
@@ -113,8 +167,9 @@ def test_validate_all_output_fails_on_invalid(tmp_path: Path) -> None:
     (tmp_path / "json" / "DE.json").write_text(
         '{"schema_version": 1, "market": {}, "sources": [], "entries": [], "derived_rules": [], "unclassified_entries": [], "warnings": [], "derivation_status": "invalid"}'
     )
+    _write_minimal_publication_files(tmp_path, markets=0, rules=0)
     with pytest.raises(CrawlerValidationError):
-        validate_all_output(tmp_path)
+        validate_all_output(tmp_path, strict=True)
 
 
 def test_validate_core_fees() -> None:
@@ -624,3 +679,157 @@ def test_semantic_validation_fails_cross_fragment_evidence() -> None:
             "/unused", core_fees=core_fees, manifest=_market_manifest_for_ae(), payment_methods=_payment_methods()
         )
     assert "different source fragments" in str(excinfo.value).lower()
+
+
+def _valid_repo_with_unsupported(tmp_path: Path) -> None:
+    supported = _valid_complete_output("DE")
+    unsupported_market = Market(
+        stripe_market_code="id",
+        account_country="ID",
+        country_name="Indonesia",
+        locale="en-id",
+        url_prefix="https://stripe.com/en-id",
+        status="pricing_page_unavailable",
+    )
+    unsupported_record = UnsupportedMarket(
+        stripe_market_code="id",
+        account_country="ID",
+        country_name="Indonesia",
+        reason="pricing_page_unavailable",
+        status="pricing_page_unavailable",
+        requested_urls=[],
+    )
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish(
+        [supported],
+        [supported.market, unsupported_market],
+        [unsupported_record],
+        [],
+    )
+    publisher.commit(staging, validate=False)
+    _write_minimal_publication_files(tmp_path, markets=2, unsupported=1, rules=0)
+
+
+def test_validate_change_report_missing(tmp_path: Path) -> None:
+    output = _valid_complete_output("DE")
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish([output], [output.market], [], [])
+    publisher.commit(staging, validate=False)
+    (tmp_path / "meta").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "meta" / "crawl-report.json").write_text(json.dumps(CrawlReport().model_dump()), encoding="utf-8")
+    (tmp_path / "README.md").write_text("<!-- STATS_START -->\n<!-- STATS_END -->", encoding="utf-8")
+    with pytest.raises(CrawlerValidationError) as exc_info:
+        validate_all_output(tmp_path, strict=True)
+    assert "change-report.json is missing" in str(exc_info.value)
+
+
+def test_validate_change_report_malformed(tmp_path: Path) -> None:
+    output = _valid_complete_output("DE")
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish([output], [output.market], [], [])
+    publisher.commit(staging, validate=False)
+    _write_minimal_publication_files(tmp_path, rules=0)
+    (tmp_path / "change-report.json").write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(CrawlerValidationError) as exc_info:
+        validate_all_output(tmp_path, strict=True)
+    assert "not a valid ChangeReport" in str(exc_info.value)
+
+
+def test_validate_change_report_has_regression(tmp_path: Path) -> None:
+    output = _valid_complete_output("DE")
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish([output], [output.market], [], [])
+    publisher.commit(staging, validate=False)
+    _write_minimal_publication_files(tmp_path, rules=0)
+    (tmp_path / "change-report.json").write_text(
+        json.dumps(
+            ChangeReport(
+                changes=[{"kind": "removed_market", "country_code": "US"}],
+            ).model_dump()
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(CrawlerValidationError) as exc_info:
+        validate_all_output(tmp_path, strict=True)
+    assert "has_regression is true" in str(exc_info.value)
+
+
+def test_validate_crawl_report_missing(tmp_path: Path) -> None:
+    output = _valid_complete_output("DE")
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish([output], [output.market], [], [])
+    publisher.commit(staging, validate=False)
+    (tmp_path / "change-report.json").write_text(json.dumps(ChangeReport().model_dump()), encoding="utf-8")
+    (tmp_path / "README.md").write_text("<!-- STATS_START -->\n<!-- STATS_END -->", encoding="utf-8")
+    with pytest.raises(CrawlerValidationError) as exc_info:
+        validate_all_output(tmp_path, strict=True)
+    assert "meta/crawl-report.json is missing" in str(exc_info.value)
+
+
+def test_validate_readme_core_rule_count_mismatch(tmp_path: Path) -> None:
+    output = _valid_complete_output("DE")
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish([output], [output.market], [], [])
+    publisher.commit(staging, validate=False)
+    _write_minimal_publication_files(tmp_path, rules=0)
+    readme = (tmp_path / "README.md").read_text(encoding="utf-8")
+    readme = readme.replace("**0**", "**999**")
+    (tmp_path / "README.md").write_text(readme, encoding="utf-8")
+    with pytest.raises(CrawlerValidationError) as exc_info:
+        validate_all_output(tmp_path, strict=True)
+    assert "README core fee rules" in str(exc_info.value)
+
+
+def test_validate_require_all_complete_unclassified_in_index(tmp_path: Path) -> None:
+    output = _valid_complete_output("DE")
+    output = output.model_copy(
+        update={"derivation_status": "unclassified", "calculator_coverage_status": "unclassified"}
+    )
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish([output], [output.market], [], [])
+    publisher.commit(staging, validate=False)
+    _write_minimal_publication_files(tmp_path, rules=0)
+    with pytest.raises(CrawlerValidationError) as exc_info:
+        validate_data_repository(tmp_path, strict=True, require_all_complete=True)
+    assert "supported market is not complete" in str(exc_info.value)
+
+
+def test_validate_require_all_complete_explicitly_unsupported(tmp_path: Path) -> None:
+    _valid_repo_with_unsupported(tmp_path)
+    result = validate_data_repository(tmp_path, strict=True, require_all_complete=True)
+    assert result["success"]
+
+
+def test_validate_require_all_complete_missing_unsupported(tmp_path: Path) -> None:
+    """A market in the manifest that is not supported and not recorded as unsupported fails."""
+    supported = _valid_complete_output("DE")
+    missing_market = Market(
+        stripe_market_code="id",
+        account_country="ID",
+        country_name="Indonesia",
+        locale="en-id",
+        url_prefix="https://stripe.com/en-id",
+        status="pricing_page_unavailable",
+    )
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish([supported], [supported.market, missing_market], [], [])
+    publisher.commit(staging, validate=False)
+    _write_minimal_publication_files(tmp_path, markets=2, rules=0)
+    with pytest.raises(CrawlerValidationError) as exc_info:
+        validate_data_repository(tmp_path, strict=True, require_all_complete=True)
+    assert "expected exactly one state" in str(exc_info.value)
+
+
+def test_validate_completeness_index_core_status_mismatch(tmp_path: Path) -> None:
+    supported = _valid_complete_output("DE")
+    publisher = OutputPublisher(tmp_path, timestamp=None)
+    _, staging = publisher.publish([supported], [supported.market], [], [])
+    publisher.commit(staging, validate=False)
+    _write_minimal_publication_files(tmp_path, rules=0)
+    core_path = tmp_path / "json" / "core-fees.json"
+    core_data = json.loads(core_path.read_text(encoding="utf-8"))
+    core_data["markets"][0]["derivation_status"] = "partial"
+    core_path.write_text(json.dumps(core_data), encoding="utf-8")
+    with pytest.raises(CrawlerValidationError) as exc_info:
+        validate_data_repository(tmp_path, strict=True, require_all_complete=True)
+    assert "derivation_status mismatch" in str(exc_info.value)

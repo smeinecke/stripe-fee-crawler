@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import shutil
+import subprocess  # nosec
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,7 +103,12 @@ class OutputPublisher:
 
     # These are the only paths the crawler owns. The output directory itself may
     # be the root of a git repository and must never be renamed or deleted.
-    MANAGED_PATHS = ("json", "meta", "schemas", "change-report.json")
+    MANAGED_PATHS = ("json", "meta", "schemas", "change-report.json", "README.md")
+
+    # Paths that may legitimately differ between runs (e.g. the crawl report
+    # records whether the run changed the data) and must not feed back into the
+    # "changed" flag itself.
+    IGNORED_CHANGED_PATHS = frozenset({"meta/crawl-report.json"})
 
     def __init__(
         self,
@@ -167,6 +174,7 @@ class OutputPublisher:
                     source_urls=[s.canonical_url or s.requested_url for s in output.sources],
                     source_updated_at=output.sources[0].source_updated_at if output.sources else None,
                     derivation_status=output.derivation_status,
+                    calculator_coverage_status=output.calculator_coverage_status,
                     content_sha256=content_hash,
                 )
             )
@@ -280,7 +288,7 @@ class OutputPublisher:
             fee_page_urls=fee_page_urls or {},
         )
         _write_json(staging / "meta" / "markets.json", manifest.model_dump())
-        unsupported_only = [u for u in unsupported if u.status == "unsupported"]
+        unsupported_only = [u for u in unsupported if u.status != "transient_failure"]
         _write_json(staging / "meta" / "unsupported-markets.json", unsupported_only)
         _write_json(staging / "meta" / "transient-failures.json", transient_failures)
         _write_json(
@@ -324,6 +332,7 @@ class OutputPublisher:
         live tree has also passed validation.
         """
         changed_files = self._list_changed_files(staging)
+        changed = bool(set(changed_files) - self.IGNORED_CHANGED_PATHS)
         if not changed_files and self._output_dir_exists_and_matches(staging):
             self.rollback(staging)
             return False, []
@@ -389,7 +398,7 @@ class OutputPublisher:
 
             self._cleanup_backups_best_effort(journal)
             self.rollback(staging)
-            return bool(changed_files), changed_files
+            return changed, changed_files
 
         except Exception as exc:
             if not finalized:
@@ -398,6 +407,37 @@ class OutputPublisher:
             if isinstance(exc, CrawlerValidationError):
                 raise
             raise CrawlerValidationError(f"Failed to publish output: {exc}") from exc
+
+    def data_changed(self, staging: Path) -> bool:
+        """Return whether the staged data tree differs from the live one.
+
+        This excludes the crawl report itself, which records the result of this
+        computation and must not affect it.
+        """
+        changed_files = self._list_changed_files(staging)
+        return bool(set(changed_files) - self.IGNORED_CHANGED_PATHS)
+
+    def write_crawl_report(self, staging: Path, report: Any) -> None:
+        """Write the crawl execution report to meta/crawl-report.json."""
+        _write_json(staging / "meta" / "crawl-report.json", report.model_dump())
+
+    def generate_readme(self, staging: Path) -> None:
+        """Regenerate README.md from the staged artifacts."""
+        script_path = self.output_dir / "scripts" / "generate_readme.py"
+        if not script_path.exists():
+            # Fall back to the bundled script adjacent to the crawler package.
+            script_path = Path(__file__).resolve().parent.parent.parent.parent / "scripts" / "generate_readme.py"
+        if not script_path.exists():
+            return
+        try:
+            subprocess.run(  # nosec
+                [sys.executable, str(script_path), str(staging)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception as exc:
+            logger.warning("README generation failed: %s", exc)
 
     def _list_changed_files(self, staging: Path) -> list[str]:
         """Return relative paths of managed files that differ from published output."""

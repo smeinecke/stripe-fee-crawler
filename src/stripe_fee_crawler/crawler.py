@@ -13,6 +13,8 @@ from .classify import derive_market_fees
 from .discovery import (
     MarketDiscoveryError,
     UnsupportedMarketError,
+    _payment_methods_url_for,
+    _pricing_url_for,
     build_market_from_code,
     discover_fee_pages,
     discover_markets,
@@ -78,6 +80,7 @@ class StripeCrawler:
         self.warnings: list[ParserWarning] = []
         self.aliases: dict[str, str] = {}
         self.fee_page_urls: dict[str, list[str]] = {}
+        self.discovered_markets: list[Market] | None = None
 
     async def discover(self) -> list[Market]:
         """Discover Stripe markets dynamically or from the bootstrap list."""
@@ -109,6 +112,7 @@ class StripeCrawler:
                 derivation_status="unclassified",
                 transient_failure=False,
                 unsupported_reason="pricing_page_unavailable",
+                requested_urls=[],
             )
 
         try:
@@ -121,6 +125,7 @@ class StripeCrawler:
                 derivation_status="unclassified",
                 transient_failure=False,
                 unsupported_reason=exc.args[0] if exc.args else "unsupported",
+                requested_urls=exc.requested_urls,
             )
         except (FeePageError, NetworkError, AccessChallengeError) as exc:
             transient = True
@@ -237,25 +242,35 @@ class StripeCrawler:
         if markets is None:
             markets = await self.discover()
 
+        self.discovered_markets = list(markets)
+        checked_at = self.config.timestamp or self.config.source_timestamp_override
         unsupported: list[UnsupportedMarket] = []
         outputs: list[MarketOutput] = []
         semaphore = asyncio.Semaphore(self.config.max_workers)
 
+        def _unsupported_record(
+            market: Market, reason: str, status: str, requested_urls: list[str] | None = None
+        ) -> None:
+            unsupported.append(
+                UnsupportedMarket(
+                    stripe_market_code=market.stripe_market_code,
+                    account_country=market.account_country,
+                    country_name=market.country_name,
+                    requested_urls=requested_urls or [],
+                    reason=reason,
+                    status=status,
+                    checked_at=checked_at,
+                )
+            )
+
         async def _crawl_one(market: Market) -> MarketOutput | None:
             async with semaphore:
-                try:
-                    return await self.crawl_market(market)
-                except UnsupportedMarketError as exc:
-                    unsupported.append(
-                        UnsupportedMarket(
-                            stripe_market_code=market.stripe_market_code,
-                            account_country=market.account_country,
-                            country_name=market.country_name,
-                            tested_urls=exc.tested_urls,
-                            reason=exc.args[0] if exc.args else "unsupported",
-                        )
-                    )
+                if market.status in {"unsupported", "pricing_page_unavailable"}:
+                    requested_urls = [u for u in (_pricing_url_for(market), _payment_methods_url_for(market)) if u]
+                    _unsupported_record(market, market.status, market.status, requested_urls)
                     return None
+                try:
+                    output = await self.crawl_market(market)
                 except Exception as exc:
                     logger.warning("Unexpected failure for %s: %s", market.account_country, exc)
                     return MarketOutput(
@@ -270,6 +285,15 @@ class StripeCrawler:
                             )
                         ],
                     )
+                if output.unsupported_reason:
+                    if output.unsupported_reason in {"unsupported", "pricing_page_unavailable", "explicitly_excluded"}:
+                        _unsupported_record(
+                            market, output.unsupported_reason, output.unsupported_reason, output.requested_urls
+                        )
+                    else:
+                        _unsupported_record(market, output.unsupported_reason, "unsupported", output.requested_urls)
+                    return None
+                return output
 
         tasks = [asyncio.create_task(_crawl_one(m)) for m in markets]
         results = await asyncio.gather(*tasks)
@@ -288,7 +312,7 @@ class StripeCrawler:
         publisher = OutputPublisher(output_dir, timestamp=self.config.timestamp)
         staging: Path | None = None
         try:
-            markets = [o.market for o in outputs]
+            discovered_markets = getattr(self, "discovered_markets", None) or [o.market for o in outputs]
             transient_failures = [
                 UnsupportedMarket(
                     stripe_market_code=o.market.stripe_market_code,
@@ -304,7 +328,7 @@ class StripeCrawler:
             crawler_revision = _crawler_revision()
             _, staging = publisher.publish(
                 outputs,
-                markets,
+                discovered_markets,
                 unsupported,
                 transient_failures,
                 aliases=self.aliases,
@@ -338,13 +362,15 @@ class StripeCrawler:
 
                 raise RegressionError("Regression detected; publication aborted")
 
+            publisher.generate_readme(staging)
+
+            coverage_summary = _aggregate_coverage(outputs)
             if atomic:
                 changed, _ = publisher.commit(staging, validate=True)
             else:
                 validate_all_output(staging, strict=True)
                 changed = _staging_changed(staging, old_dir)
 
-            coverage_summary = _aggregate_coverage(outputs)
             report = CrawlReport(
                 exit_code=0,
                 changed=changed,
@@ -358,6 +384,8 @@ class StripeCrawler:
                 cache_stats=self.http_client.cache_stats,
                 coverage_summary=coverage_summary,
             )
+            _write_crawl_report(Path(output_dir), report)
+
             return report
         except Exception:
             if staging is not None:
@@ -395,6 +423,16 @@ def _aggregate_coverage(outputs: list[MarketOutput]) -> CoverageSummary:
         for field, value in output.coverage_summary.model_dump().items():
             totals[field] = totals.get(field, 0) + int(value)
     return CoverageSummary(**totals)
+
+
+def _write_crawl_report(output_dir: Path, report: CrawlReport) -> None:
+    """Write the crawl execution report outside the atomic staging transaction."""
+    path = output_dir / "meta" / "crawl-report.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(report.model_dump(), indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _files_equal(a: Path, b: Path) -> bool:
