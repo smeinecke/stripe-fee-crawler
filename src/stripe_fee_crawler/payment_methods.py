@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -153,30 +152,8 @@ def _earliest_payment_method(text: str, max_word_index: int | None = None) -> st
     return best[3] if best else None
 
 
-def _infer_payment_method_from_candidates(candidates: Iterable[str]) -> str | None:
-    """Return the first payment method found across ``candidates`` in order.
-
-    Matches are word-boundary aware and chosen by earliest word position, with
-    candidates earlier in the iterable taking precedence.
-    """
-    best: tuple[int, int, int, int, str] | None = None
-    for candidate_index, raw in enumerate(candidates):
-        text_lower = raw.lower()
-        for method in _PAYMENT_METHOD_TOKENS:
-            display = method.replace("_", " ")
-            for match in re.finditer(rf"\b{re.escape(display)}s?\b", text_lower):
-                word_index = len(text_lower[: match.start()].split())
-                # Earlier candidate wins, then earliest word position, then
-                # earliest character start, then longest display name.
-                key = (candidate_index, word_index, match.start(), -len(display))
-                if best is None or key < best[:4]:
-                    best = (*key, method)
-    return best[4] if best else None
-
-
 __all__ = [
     "_PAYMENT_METHOD_TOKENS",
     "_family_for_method",
     "_earliest_payment_method",
-    "_infer_payment_method_from_candidates",
 ]
