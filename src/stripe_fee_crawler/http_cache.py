@@ -491,14 +491,16 @@ class HttpCache:
                     self.stats.cache_hits += 1
                     self.stats.bytes_avoided += len(entry.content)
                     if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug("Cache hit for %s", _normalize_url(url))
+                        normalized_url = _normalize_url(url)
+                        logger.debug("Cache hit for %s", normalized_url)
                     return entry.to_httpx_response(method), True
 
                 reval = self._revalidation_headers(entry)
                 if reval:
                     self.stats.cache_revalidations += 1
                     if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug("Cache revalidation for %s", _normalize_url(url))
+                        normalized_url = _normalize_url(url)
+                        logger.debug("Cache revalidation for %s", normalized_url)
 
                 response = await _do_network(request_headers, reval)
 
