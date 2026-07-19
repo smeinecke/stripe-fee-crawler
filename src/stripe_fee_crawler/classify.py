@@ -136,13 +136,6 @@ _CARD_NETWORK_TOKENS: tuple[str, ...] = (
 
 # Evidence vocabulary for positive fee classification and for rejecting common
 # false-positive sources.
-_ADDON_PRODUCTS: tuple[str, ...] = (
-    "authorization_boost",
-    "radar",
-    "smart_disputes",
-    "three_d_secure",
-)
-
 _POSITIVE_FEE_TERMS: tuple[str, ...] = (
     "fee",
     "fees",
@@ -297,6 +290,34 @@ _HARDWARE_PRICE_TERMS: tuple[str, ...] = (
     "tap to pay",
     "price",
     "one-time",
+)
+
+_PRODUCT_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("authorization_boost", ("authorization boost", "authorisation boost")),
+    ("smart_disputes", ("smart dispute", "smart disputes")),
+    ("disputes", ("dispute", "chargeback")),
+    ("refunds", ("refund",)),
+    ("three_d_secure", ("3d secure", "3-d secure", "customer authentication")),
+    ("instant_payouts", ("instant payout", "instant pay")),
+    ("custom_domain", ("custom domain",)),
+    ("post_payment_invoice", ("post-payment invoice", "post payment invoice")),
+    (
+        "adaptive_pricing",
+        ("adaptive pricing", "adaptive acceptance", "uplift", "foreign exchange", "fx", "converted amount"),
+    ),
+    ("invoicing", ("invoic",)),
+    ("subscriptions", ("subscription", "recurring billing")),
+    ("stablecoin_payments", ("stablecoin",)),
+    ("managed_payments", ("managed payments",)),
+    ("radar", ("radar",)),
+    ("platform", ("platform", "marketplace")),
+    ("connect", ("connect",)),
+    ("identity", ("identity verification", "identity")),
+    ("sigma", ("sigma",)),
+    ("billing", ("billing",)),
+    ("payouts", ("payout",)),
+    ("tax", ("tax",)),
+    ("terminal", ("terminal", "tap to pay", "in-person", "in person", "reader")),
 )
 
 _PUBLICATION_CONFIDENCE_THRESHOLD = 0.7
@@ -1108,50 +1129,16 @@ def _product_from_heading(fee_category: str | None) -> str | None:
     if not fee_category:
         return None
     lower = fee_category.lower()
-    # Headings that name a specific payment method are handled by method detection.
     for method in _PAYMENT_METHOD_TOKENS:
         if method in {"card", "terminal"}:
             continue
         if method.replace("_", " ") in lower:
             return None
 
-    heading_products = [
-        ("authorization boost", "authorization_boost"),
-        ("authorisation boost", "authorization_boost"),
-        ("smart dispute", "smart_disputes"),
-        ("smart disputes", "smart_disputes"),
-        ("dispute", "disputes"),
-        ("chargeback", "disputes"),
-        ("refund", "refunds"),
-        ("3d secure", "three_d_secure"),
-        ("3-d secure", "three_d_secure"),
-        ("customer authentication", "three_d_secure"),
-        ("instant payout", "instant_payouts"),
-        ("instant pay", "instant_payouts"),
-        ("custom domain", "custom_domain"),
-        ("post-payment invoice", "post_payment_invoice"),
-        ("post payment invoice", "post_payment_invoice"),
-        ("adaptive pricing", "adaptive_pricing"),
-        ("foreign exchange", "adaptive_pricing"),
-        ("fx", "adaptive_pricing"),
-        ("invoic", "invoicing"),
-        ("subscription", "subscriptions"),
-        ("recurring billing", "subscriptions"),
-        ("stablecoin", "stablecoin_payments"),
-        ("managed payments", "managed_payments"),
-        ("radar", "radar"),
-        ("platform", "platform"),
-        ("marketplace", "platform"),
-        ("connect", "connect"),
-        ("identity", "identity"),
-        ("sigma", "sigma"),
-        ("billing", "billing"),
-        ("payout", "payouts"),
-        ("tax", "tax"),
-    ]
-    for keyword, product in heading_products:
-        if re.search(rf"\b{re.escape(keyword)}", lower):
-            return product
+    for product, keywords in _PRODUCT_KEYWORDS:
+        for keyword in keywords:
+            if re.search(rf"\b{re.escape(keyword)}", lower):
+                return product
     return None
 
 
@@ -1226,50 +1213,9 @@ def _infer_product_id(entry: PricingEntry) -> str:
     evidence = (entry.source_evidence or "").lower()
     combined = path + " " + category + " " + text + " " + evidence
 
-    if _text_has(combined, "smart dispute", "smart disputes"):
-        return "smart_disputes"
-    if _text_has(combined, "authorization boost", "authorisation boost"):
-        return "authorization_boost"
-    if _text_has(combined, "dispute", "chargeback"):
-        return "disputes"
-    if _text_has(combined, "refund"):
-        return "refunds"
-    if _text_has(combined, "3d secure", "3-d secure", "customer authentication"):
-        return "three_d_secure"
-    if _text_has(combined, "instant payout", "instant pay"):
-        return "instant_payouts"
-    if _text_has(combined, "custom domain"):
-        return "custom_domain"
-    if _text_has(combined, "post-payment invoice", "post payment invoice"):
-        return "post_payment_invoice"
-    if _text_has(combined, "adaptive pricing", "adaptive acceptance", "uplift") or _text_has(
-        combined, "foreign exchange", "fx", "converted amount"
-    ):
-        return "adaptive_pricing"
-    if _text_has(combined, "invoic"):
-        return "invoicing"
-    if _text_has(combined, "subscription", "recurring billing"):
-        return "subscriptions"
-    if _text_has(combined, "stablecoin"):
-        return "stablecoin_payments"
-    if _text_has(combined, "managed payments"):
-        return "managed_payments"
-    if _text_has(combined, "radar"):
-        return "radar"
-    if _text_has(combined, "platform", "marketplace", "connect"):
-        return "platform"
-    if _text_has(combined, "identity verification", "identity"):
-        return "identity"
-    if _text_has(combined, "sigma"):
-        return "sigma"
-    if _text_has(combined, "billing"):
-        return "billing"
-    if _text_has(combined, "payout") and not _text_has(combined, "instant payout"):
-        return "payouts"
-    if _text_has(combined, "tax"):
-        return "tax"
-    if _text_has(combined, "terminal", "tap to pay", "in-person", "in person", "reader"):
-        return "terminal"
+    for product, keywords in _PRODUCT_KEYWORDS:
+        if _text_has(combined, *keywords):
+            return product
 
     text = entry.source_text.lower()
     combined = path + " " + text
@@ -2770,9 +2716,6 @@ def _coverage_summary(
     rules: list[FeeRule],
     unclassified: list[PricingEntry],
 ) -> CoverageSummary:
-    summary = CoverageSummary()
-    summary = summary.model_copy(update={"source_entries": len(entries)})
-
     numeric_entries = _numeric_source_entries(entries)
     referenced_ids: set[str] = set()
     for rule in rules:
@@ -2783,59 +2726,53 @@ def _coverage_summary(
     referenced_numeric = [e for e in numeric_entries if e.entry_id in referenced_ids]
     dropped_numeric = len(numeric_entries) - len(referenced_numeric)
 
-    summary = summary.model_copy(
-        update={
-            "numeric_source_entries": len(numeric_entries),
-            "referenced_numeric_entries": len(referenced_numeric),
-            "dropped_numeric_entries": dropped_numeric,
-        }
-    )
+    counts: dict[str, int] = {
+        "source_entries": len(entries),
+        "numeric_source_entries": len(numeric_entries),
+        "referenced_numeric_entries": len(referenced_numeric),
+        "dropped_numeric_entries": dropped_numeric,
+    }
+
+    rule_status_fields = {
+        CALCULABLE_RULE: "calculable_rules",
+        NON_CALCULABLE: "non_calculable_rules",
+        "conflict": "conflicting_rule_identities",
+        INCLUDED: "included",
+        FREE: "free",
+        INFORMATIONAL: "informational",
+        CUSTOM_PRICING: "custom_pricing",
+        UNSUPPORTED_SHAPE: "unsupported_fee_shapes",
+    }
+    entry_status_fields = {
+        UNCLASSIFIED_CANDIDATE: "unclassified_fee_candidates",
+        AMBIGUOUS: "ambiguous_entries",
+        UNSUPPORTED_SHAPE: "unsupported_fee_shapes",
+        IGNORED_NON_FEE: "ignored_non_fee",
+        REFERENCE_ONLY: "reference_only",
+        INCLUDED: "included",
+        FREE: "free",
+        INFORMATIONAL: "informational",
+        CUSTOM_PRICING: "custom_pricing",
+    }
 
     for rule in rules:
-        if rule.classification_status == CALCULABLE_RULE:
-            summary = summary.model_copy(update={"calculable_rules": summary.calculable_rules + 1})
-        elif rule.classification_status == NON_CALCULABLE:
-            summary = summary.model_copy(update={"non_calculable_rules": summary.non_calculable_rules + 1})
-        elif rule.classification_status == "conflict":
-            summary = summary.model_copy(
-                update={"conflicting_rule_identities": summary.conflicting_rule_identities + 1}
-            )
+        status = rule.classification_status
+        if status == "conflict":
+            counts["conflicting_rule_identities"] = counts.get("conflicting_rule_identities", 0) + 1
             if _is_fee_candidate(rule):
-                summary = summary.model_copy(update={"blocking_fee_conflicts": summary.blocking_fee_conflicts + 1})
+                counts["blocking_fee_conflicts"] = counts.get("blocking_fee_conflicts", 0) + 1
             else:
-                summary = summary.model_copy(update={"informational_conflicts": summary.informational_conflicts + 1})
-        elif rule.classification_status == INCLUDED:
-            summary = summary.model_copy(update={"included": summary.included + 1})
-        elif rule.classification_status == FREE:
-            summary = summary.model_copy(update={"free": summary.free + 1})
-        elif rule.classification_status == INFORMATIONAL:
-            summary = summary.model_copy(update={"informational": summary.informational + 1})
-        elif rule.classification_status == CUSTOM_PRICING:
-            summary = summary.model_copy(update={"custom_pricing": summary.custom_pricing + 1})
-        elif rule.classification_status == UNSUPPORTED_SHAPE:
-            summary = summary.model_copy(update={"unsupported_fee_shapes": summary.unsupported_fee_shapes + 1})
+                counts["informational_conflicts"] = counts.get("informational_conflicts", 0) + 1
+            continue
+        field = rule_status_fields.get(status)
+        if field:
+            counts[field] = counts.get(field, 0) + 1
+
     for entry in unclassified:
-        status = entry.classification_status
-        if status == UNCLASSIFIED_CANDIDATE:
-            summary = summary.model_copy(
-                update={"unclassified_fee_candidates": summary.unclassified_fee_candidates + 1}
-            )
-        if status == AMBIGUOUS:
-            summary = summary.model_copy(update={"ambiguous_entries": summary.ambiguous_entries + 1})
-        if status == UNSUPPORTED_SHAPE:
-            summary = summary.model_copy(update={"unsupported_fee_shapes": summary.unsupported_fee_shapes + 1})
-        if status == IGNORED_NON_FEE:
-            summary = summary.model_copy(update={"ignored_non_fee": summary.ignored_non_fee + 1})
-        if status == REFERENCE_ONLY:
-            summary = summary.model_copy(update={"reference_only": summary.reference_only + 1})
-        if status == INCLUDED:
-            summary = summary.model_copy(update={"included": summary.included + 1})
-        if status == FREE:
-            summary = summary.model_copy(update={"free": summary.free + 1})
-        if status == INFORMATIONAL:
-            summary = summary.model_copy(update={"informational": summary.informational + 1})
-        if status == CUSTOM_PRICING:
-            summary = summary.model_copy(update={"custom_pricing": summary.custom_pricing + 1})
+        field = entry_status_fields.get(entry.classification_status)
+        if field:
+            counts[field] = counts.get(field, 0) + 1
+
     numeric_candidates = [
         e
         for e in unclassified
@@ -2843,8 +2780,8 @@ def _coverage_summary(
         and e.classification_status
         not in {IGNORED_NON_FEE, INFORMATIONAL, REFERENCE_ONLY, CUSTOM_PRICING, INCLUDED, FREE, UNSUPPORTED_SHAPE}
     ]
-    summary = summary.model_copy(update={"numeric_fee_candidates": len(numeric_candidates)})
-    return summary
+    counts["numeric_fee_candidates"] = len(numeric_candidates)
+    return CoverageSummary(**counts)
 
 
 def _calculator_coverage_status(
@@ -2879,9 +2816,7 @@ def _calculator_coverage_status(
 
 def _account_country_from_url(url: str) -> str | None:
     """Infer the account country from a Stripe pricing URL path."""
-    import re as _re
-
-    match = _re.search(r"/(?:([a-z]{2})-([a-z]{2})|([a-z]{2}))/pricing", url.lower())
+    match = re.search(r"/(?:([a-z]{2})-([a-z]{2})|([a-z]{2}))/pricing", url.lower())
     if match:
         return (match.group(2) or match.group(3) or "").upper()
     if "/pricing" in url.lower() and "stripe.com/pricing" in url.lower():

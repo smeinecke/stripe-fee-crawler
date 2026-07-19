@@ -104,12 +104,6 @@ class FeePageError(CrawlerError):
     pass
 
 
-class FeePageStructureError(FeePageError):
-    """A fee page was found but no longer has the expected structure."""
-
-    pass
-
-
 class UnsupportedMarketError(CrawlerError):
     """Market has no public merchant fee page."""
 

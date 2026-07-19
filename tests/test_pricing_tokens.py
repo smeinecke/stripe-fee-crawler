@@ -5,19 +5,10 @@ from __future__ import annotations
 from decimal import Decimal
 
 from stripe_fee_crawler.pricing_tokens import (
-    _detect_decimal_separator,
     _parse_decimal,
     parse_fee_value,
     tokenize_fee_text,
 )
-
-
-def test_detect_decimal_separator_comma() -> None:
-    assert _detect_decimal_separator("1,5% + 0,25 €") == ","
-
-
-def test_detect_decimal_separator_dot() -> None:
-    assert _detect_decimal_separator("2.9% + $0.30") == "."
 
 
 def test_parse_decimal_comma() -> None:

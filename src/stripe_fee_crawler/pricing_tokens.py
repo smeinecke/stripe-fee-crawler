@@ -113,8 +113,26 @@ EXACTNESS_MARKERS: dict[str, str] = {
     "no cost": "free",
 }
 
+_MAJOR_SYMBOLS = frozenset(CURRENCY_SYMBOLS) - MINOR_CURRENCY_SYMBOLS
+_SYMBOL_PATTERN_MAJOR = "|".join(re.escape(s) for s in sorted(_MAJOR_SYMBOLS, key=len, reverse=True))
+_SYMBOL_PATTERN_MINOR = "|".join(re.escape(s) for s in sorted(MINOR_CURRENCY_SYMBOLS, key=len, reverse=True))
+_SYMBOL_PATTERN_ALL = "|".join(re.escape(s) for s in sorted(CURRENCY_SYMBOLS, key=len, reverse=True))
+_CODE_PATTERN = "|".join(re.escape(c) for c in CURRENCY_CODES)
 
-OPERATOR_MARKERS: set[str] = {"+", "-", "&", "and", "or", "if", "for"}
+_AMOUNT_GROUP = r"(?P<amount>[0-9][0-9\s,.]*)"
+_AMOUNT_GROUP_NB = r"(?P<amount>[0-9][0-9,.]*)"
+
+_CURRENCY_AND_AMOUNT_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
+    ("symbol_prefix", re.compile(rf"(?P<symbol>{_SYMBOL_PATTERN_MAJOR})\s*{_AMOUNT_GROUP_NB}"), "symbol"),
+    ("symbol_suffix", re.compile(rf"{_AMOUNT_GROUP}\s*(?P<symbol>{_SYMBOL_PATTERN_ALL})(?!\w)"), "symbol"),
+    ("code_prefix", re.compile(rf"(?P<code>{_CODE_PATTERN})\s*{_AMOUNT_GROUP_NB}"), "code"),
+    ("code_suffix", re.compile(rf"{_AMOUNT_GROUP}\s*(?P<code>{_CODE_PATTERN})(?!\w)"), "code"),
+    ("symbol_minor_tight", re.compile(rf"(?P<amount>[0-9][0-9,.]*)(?P<symbol>{_SYMBOL_PATTERN_MINOR})(?!\w)"), "symbol"),
+]
+
+_EXACTNESS_PATTERN = re.compile(
+    r"\b(" + "|".join(re.escape(m) for m in sorted(EXACTNESS_MARKERS, key=len, reverse=True)) + r")\b"
+)
 
 
 def _normalize_for_parsing(text: str) -> str:
@@ -124,46 +142,6 @@ def _normalize_for_parsing(text: str) -> str:
     # Currency-symbol spacing is handled by regex; do not collapse here because
     # multi-character symbols such as "A$" are parsed correctly with \s*.
     return text
-
-
-def _detect_decimal_separator(text: str) -> str:
-    """Detect whether dot or comma is the decimal separator.
-
-    The detection is conservative: a comma followed by exactly three digits is
-    treated as a thousands separator unless a dot is also present and is the
-    rightmost separator.  A separator followed by one or two digits is the
-    decimal separator.
-    """
-    text = re.sub(r"[^0-9.,]", "", text)
-    if not text:
-        return "."
-
-    last_dot = text.rfind(".")
-    last_comma = text.rfind(",")
-
-    # When both separators are present, the rightmost one is the decimal mark
-    # and the other is a thousands separator.
-    if last_dot != -1 and last_comma != -1:
-        if last_dot > last_comma:
-            return "."
-        return ","
-
-    # Only one separator type is present.
-    sep = "." if last_dot != -1 else ","
-    parts = text.split(sep)
-    if not parts or not parts[-1].isdigit():
-        return sep
-
-    # A trailing group of exactly three digits with preceding groups of three
-    # digits is a thousands grouping, not a decimal fraction.
-    if len(parts[-1]) == 3 and all(len(p) == 3 for p in parts[1:]):
-        return "."
-
-    # A trailing group of one or two digits is a decimal fraction.
-    if len(parts[-1]) <= 2:
-        return sep
-
-    return "."
 
 
 def _parse_decimal(text: str) -> Decimal | None:
@@ -254,30 +232,6 @@ def _extract_currency_and_amount(text: str) -> list[dict[str, Any]]:
     ``from the P24 portal`` are not parsed as amounts, and skips marketing
     magnitudes such as ``$1 billion``.
     """
-    # Minor symbols are only valid as suffixes.
-    major_symbols = {s for s in CURRENCY_SYMBOLS if s not in MINOR_CURRENCY_SYMBOLS}
-    minor_symbols = MINOR_CURRENCY_SYMBOLS
-    symbol_pattern_major = "|".join(re.escape(s) for s in sorted(major_symbols, key=len, reverse=True))
-    symbol_pattern_minor = "|".join(re.escape(s) for s in sorted(minor_symbols, key=len, reverse=True))
-    symbol_pattern_all = "|".join(re.escape(s) for s in sorted(CURRENCY_SYMBOLS, key=len, reverse=True))
-    code_pattern = "|".join(re.escape(c) for c in CURRENCY_CODES)
-
-    amount_group = r"(?P<amount>[0-9][0-9\s,.]*)"
-    amount_group_nb = r"(?P<amount>[0-9][0-9,.]*)"
-
-    patterns: list[tuple[str, str, str]] = [
-        # Major-symbol prefix: A$89, $100, € 1.50
-        ("symbol_prefix", rf"(?P<symbol>{symbol_pattern_major})\s*{amount_group_nb}", "symbol"),
-        # Symbol suffix: 100 USD, 20p, 5¢, 100 kr
-        ("symbol_suffix", rf"{amount_group}\s*(?P<symbol>{symbol_pattern_all})(?!\w)", "symbol"),
-        # ISO-code prefix: USD 100
-        ("code_prefix", rf"(?P<code>{code_pattern})\s*{amount_group_nb}", "code"),
-        # ISO-code suffix: 100 USD
-        ("code_suffix", rf"{amount_group}\s*(?P<code>{code_pattern})(?!\w)", "code"),
-        # Minor-symbol suffix without whitespace: 20p, 5¢
-        ("symbol_minor_tight", rf"(?P<amount>[0-9][0-9,.]*)(?P<symbol>{symbol_pattern_minor})(?!\w)", "symbol"),
-    ]
-
     seen_spans: list[tuple[int, int]] = []
     results: list[tuple[int, int, dict[str, Any]]] = []
     marketing_magnitudes = ("billion", "million", "trillion")
@@ -287,8 +241,8 @@ def _extract_currency_and_amount(text: str) -> list[dict[str, Any]]:
             return text[idx]
         return None
 
-    for _match_type, pattern, group in patterns:
-        for match in re.finditer(pattern, text):
+    for _match_type, pattern, group in _CURRENCY_AND_AMOUNT_PATTERNS:
+        for match in pattern.finditer(text):
             span = match.span()
             # Skip overlaps with already-selected matches.
             if any(span[0] < end and span[1] > start for start, end in seen_spans):
@@ -376,11 +330,8 @@ def _extract_percentage(text: str) -> list[dict[str, Any]]:
 
 
 def _extract_exactness(text: str) -> str | None:
-    lower = text.lower()
-    for marker, exactness in EXACTNESS_MARKERS.items():
-        if re.search(r"\b" + re.escape(marker) + r"\b", lower):
-            return exactness
-    return None
+    match = _EXACTNESS_PATTERN.search(text.lower())
+    return EXACTNESS_MARKERS[match.group(1)] if match else None
 
 
 def _extract_operators(text: str) -> list[str]:
@@ -401,6 +352,9 @@ def tokenize_fee_text(text: str) -> list[FeeToken]:
     """Tokenize a fee phrase into normalized amount/percentage tokens."""
     text = clean_fee_text(text)
     text = _normalize_for_parsing(text)
+    exactness = _extract_exactness(text)
+    operators = _extract_operators(text)
+    operator = "+" if "+" in text else None
     tokens: list[FeeToken] = []
     amounts = _extract_currency_and_amount(text)
     for amount in amounts:
@@ -411,8 +365,8 @@ def tokenize_fee_text(text: str) -> list[FeeToken]:
                 kind="amount",
                 amount=amount["amount"],
                 currency=amount["currency"],
-                operator="+" if "+" in text else None,
-                exactness=_extract_exactness(text),
+                operator=operator,
+                exactness=exactness,
                 token_id=token_id,
                 is_minor_currency=amount.get("is_minor", False),
             )
@@ -425,13 +379,11 @@ def tokenize_fee_text(text: str) -> list[FeeToken]:
                 kind="percentage",
                 percentage=pct["percentage"],
                 basis_points=pct["basis_points"],
-                operator="+" if "+" in text else None,
-                exactness=_extract_exactness(text),
+                operator=operator,
+                exactness=exactness,
                 token_id=token_id,
             )
         )
-    exactness = _extract_exactness(text)
-    operators = _extract_operators(text)
     if not tokens and exactness:
         tokens.append(
             FeeToken(

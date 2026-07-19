@@ -150,13 +150,6 @@ def _country_name_to_iso(name: str) -> str | None:
     return COUNTRY_NAME_TO_ISO.get(normalized)
 
 
-def _locale_for_country(country_code: str, language: str = "en") -> str:
-    country_code = country_code.upper()
-    if country_code in DIRECT_LOCALE_MARKETS:
-        return f"{language}-{country_code.lower()}"
-    return f"{language}-{country_code.lower()}"
-
-
 def _pricing_url_for(market: Market) -> str:
     """Return a market-locale URL that is independent of crawler IP geolocation.
 
@@ -174,15 +167,6 @@ def _payment_methods_url_for(market: Market) -> str:
 def _is_html_response(response: HttpResponse) -> bool:
     content_type = response.headers.get("content-type", "").lower()
     return "text/html" in content_type or "application/xhtml" in content_type
-
-
-def _canonical_market_code(iso_code: str, _language: str = "en") -> str:
-    """Return the canonical Stripe market code (country code) for a market.
-
-    The canonical code is the lower-case ISO 3166-1 alpha-2 account country.
-    Locale variants (e.g. ``en-de`` and ``de-de``) are recorded as aliases.
-    """
-    return iso_code.lower()
 
 
 def _extract_footer_markets(tree: Any) -> tuple[list[Market], dict[str, str]]:
@@ -222,7 +206,7 @@ def _extract_footer_markets(tree: Any) -> tuple[list[Market], dict[str, str]]:
         if not iso_code:
             continue
 
-        canonical_code = _canonical_market_code(iso_code, locale.split("-")[0])
+        canonical_code = iso_code.lower()
         if iso_code in seen_countries:
             # Record the alternate locale as an alias for the canonical market.
             if locale != canonical_code:

@@ -333,35 +333,4 @@ def check_regression(
     old_dir = Path(old_data_dir)
     new_dir = Path(new_data_dir)
     changes = _detect_changes(old_dir, new_dir, thresholds)
-    return ChangeReport(
-        schema_version=1,
-        generated_at=None,
-        changes=changes,
-        has_regression=any(
-            c.kind
-            in {
-                "removed_market",
-                "discovered_to_missing",
-                "supported_to_transient",
-                "supported_to_unsupported",
-                "removed_section",
-                "removed_entry",
-                "lost_core_category",
-                "structural_regression",
-                "sharp_section_drop",
-                "sharp_entry_drop",
-                "sharp_rule_drop",
-                "sharp_market_drop",
-                "classified_to_unclassified",
-                "fee_value_disappeared",
-                "duplicate_identifier",
-                "currency_changed",
-                "source_url_changed",
-                "large_percentage_change",
-                "large_fixed_change",
-                "schema_incompatible",
-                "parser_output_empty",
-            }
-            for c in changes
-        ),
-    )
+    return ChangeReport(schema_version=1, generated_at=None, changes=changes)

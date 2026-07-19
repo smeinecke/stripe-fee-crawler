@@ -7,6 +7,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from .exceptions import ExitCode
+from .normalize import normalize_country_code, normalize_currency, normalize_locale
 
 
 def _require_string(value: Any) -> str:
@@ -53,15 +54,12 @@ class Market(BaseModel):
     @field_validator("account_country")
     @classmethod
     def _validate_account_country(cls, value: str) -> str:
-        value = _require_string(value).upper()
-        if len(value) != 2 or not value.isalpha():
-            raise ValueError(f"account_country must be an ISO 3166-1 alpha-2 code: {value!r}")
-        return value
+        return normalize_country_code(_require_string(value))
 
     @field_validator("locale")
     @classmethod
     def _validate_locale(cls, value: str) -> str:
-        return _require_string(value)
+        return normalize_locale(_require_string(value))
 
     @field_validator("stripe_market_code")
     @classmethod
@@ -75,6 +73,13 @@ class Market(BaseModel):
         if value not in allowed:
             raise ValueError(f"status must be one of {allowed}")
         return value
+
+    @field_validator("default_currency")
+    @classmethod
+    def _validate_default_currency(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return normalize_currency(value)
 
     @computed_field
     @property
@@ -781,6 +786,40 @@ class ChangeType(BaseModel):
     message: str | None = None
 
 
+REGRESSION_KINDS: frozenset[str] = frozenset(
+    {
+        "removed_market",
+        "discovered_to_missing",
+        "supported_to_transient",
+        "supported_to_unsupported",
+        "removed_section",
+        "removed_entry",
+        "lost_core_category",
+        "structural_regression",
+        "sharp_section_drop",
+        "sharp_entry_drop",
+        "sharp_rule_drop",
+        "sharp_market_drop",
+        "classified_to_unclassified",
+        "fee_value_disappeared",
+        "fee_component_disappeared",
+        "condition_changed",
+        "cap_changed",
+        "classification_status_regression",
+        "calculable_to_non_calculable",
+        "duplicate_identifier",
+        "duplicate_identity",
+        "market_coverage_changed",
+        "currency_changed",
+        "source_url_changed",
+        "large_percentage_change",
+        "large_fixed_change",
+        "schema_incompatible",
+        "parser_output_empty",
+    }
+)
+
+
 class ChangeReport(BaseModel):
     """Machine-readable change report between two runs."""
 
@@ -794,41 +833,11 @@ class ChangeReport(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _compute_has_regression(cls, data: Any) -> Any:
-        regression_kinds = {
-            "removed_market",
-            "discovered_to_missing",
-            "supported_to_transient",
-            "supported_to_unsupported",
-            "removed_section",
-            "removed_entry",
-            "lost_core_category",
-            "structural_regression",
-            "sharp_section_drop",
-            "sharp_entry_drop",
-            "sharp_rule_drop",
-            "sharp_market_drop",
-            "classified_to_unclassified",
-            "fee_value_disappeared",
-            "fee_component_disappeared",
-            "condition_changed",
-            "cap_changed",
-            "classification_status_regression",
-            "calculable_to_non_calculable",
-            "duplicate_identifier",
-            "duplicate_identity",
-            "market_coverage_changed",
-            "currency_changed",
-            "source_url_changed",
-            "large_percentage_change",
-            "large_fixed_change",
-            "schema_incompatible",
-            "parser_output_empty",
-        }
         if isinstance(data, dict):
             changes = data.get("changes", [])
             data["has_regression"] = any(
-                (isinstance(change, dict) and change.get("kind") in regression_kinds)
-                or (getattr(change, "kind", None) in regression_kinds)
+                (isinstance(change, dict) and change.get("kind") in REGRESSION_KINDS)
+                or (getattr(change, "kind", None) in REGRESSION_KINDS)
                 for change in changes
             )
         return data
@@ -877,17 +886,11 @@ class CrawlConfiguration(BaseModel):
     user_agent: str | None = None
     atomic: bool = True
     fail_on_regression: bool = False
-    fail_on_warning: bool = False
-    allow_market_drop: bool = False
     refresh_market_manifest: bool = False
-    keep_diagnostics: bool = False
-    verbose: bool = False
     strict: bool = False
     allow_partial: bool = False
-    transient_policy: str = "preserve"
     max_response_size: int = 10 * 1024 * 1024  # 10 MB
     allowed_domains: list[str] = Field(default_factory=lambda: ["stripe.com", "www.stripe.com", "docs.stripe.com"])
-    market_manifest_path: str | None = None
     offline_fixtures: dict[str, str] | None = None
     source_timestamp_override: str | None = None
     cache_dir: str | None = None
@@ -908,14 +911,6 @@ class CrawlConfiguration(BaseModel):
     def _timeout_positive(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("timeout must be positive")
-        return value
-
-    @field_validator("transient_policy")
-    @classmethod
-    def _transient_policy_allowed(cls, value: str) -> str:
-        allowed = {"preserve", "fail", "ignore"}
-        if value not in allowed:
-            raise ValueError(f"transient_policy must be one of {allowed}")
         return value
 
     @field_validator("cache_ttl_hours")

@@ -88,15 +88,6 @@ class HttpResponse:
             self.requested_url = self.url
 
 
-@dataclass
-class CachedSource:
-    """Previously published source data for conditional requests (kept for compat)."""
-
-    etag: str | None = None
-    last_modified: str | None = None
-    content_sha256: str | None = None
-
-
 class HttpClient:
     """HTTP client with retries, allowlist, conditional requests, and response caching."""
 
@@ -314,7 +305,6 @@ class HttpClient:
         *,
         market: str | None = None,
         locale: str | None = None,
-        cached: CachedSource | None = None,
         **kwargs: Any,
     ) -> HttpResponse:
         if self.config.offline_fixtures and url in self.config.offline_fixtures:
@@ -417,15 +407,5 @@ class HttpClient:
         *,
         market: str | None = None,
         locale: str | None = None,
-        cached: CachedSource | None = None,
     ) -> HttpResponse:
-        return await self._request("GET", url, market=market, locale=locale, cached=cached)
-
-    async def head(
-        self,
-        url: str,
-        *,
-        market: str | None = None,
-        locale: str | None = None,
-    ) -> HttpResponse:
-        return await self._request("HEAD", url, market=market, locale=locale)
+        return await self._request("GET", url, market=market, locale=locale)

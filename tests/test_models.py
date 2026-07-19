@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from stripe_fee_crawler.models import (
+    REGRESSION_KINDS,
     ChangeReport,
     FeeRule,
     Market,
@@ -61,3 +62,12 @@ def test_change_report_has_regression() -> None:
 def test_change_report_no_regression() -> None:
     report = ChangeReport(changes=[{"kind": "new_market", "country_code": "US", "message": "test"}])
     assert not report.has_regression
+
+
+def test_regression_kinds_pinned() -> None:
+    """The regression-kind set must not drift from the ChangeReport validator."""
+    assert isinstance(REGRESSION_KINDS, frozenset)
+    assert "removed_market" in REGRESSION_KINDS
+    assert "fee_component_disappeared" in REGRESSION_KINDS
+    assert "market_coverage_changed" in REGRESSION_KINDS
+    assert "new_market" not in REGRESSION_KINDS
