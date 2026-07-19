@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
@@ -918,4 +919,27 @@ class CrawlConfiguration(BaseModel):
     def _cache_ttl_positive(cls, value: float) -> float:
         if value <= 0:
             raise ValueError("cache_ttl_hours must be positive")
+        return value
+
+    @field_validator("atomic")
+    @classmethod
+    def _warn_unused_atomic(cls, value: bool) -> bool:
+        if value is False:
+            warnings.warn(
+                "CrawlConfiguration.atomic is deprecated and ignored; "
+                "use the --atomic CLI flag or OutputPublisher.publish(atomic=...).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        return value
+
+    @field_validator("allow_partial")
+    @classmethod
+    def _warn_unimplemented_allow_partial(cls, value: bool) -> bool:
+        if value is True:
+            warnings.warn(
+                "CrawlConfiguration.allow_partial is not yet implemented and has no effect.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         return value

@@ -127,12 +127,16 @@ _CURRENCY_AND_AMOUNT_PATTERNS: list[tuple[str, re.Pattern[str], str]] = [
     ("symbol_suffix", re.compile(rf"{_AMOUNT_GROUP}\s*(?P<symbol>{_SYMBOL_PATTERN_ALL})(?!\w)"), "symbol"),
     ("code_prefix", re.compile(rf"(?P<code>{_CODE_PATTERN})\s*{_AMOUNT_GROUP_NB}"), "code"),
     ("code_suffix", re.compile(rf"{_AMOUNT_GROUP}\s*(?P<code>{_CODE_PATTERN})(?!\w)"), "code"),
-    ("symbol_minor_tight", re.compile(rf"(?P<amount>[0-9][0-9,.]*)(?P<symbol>{_SYMBOL_PATTERN_MINOR})(?!\w)"), "symbol"),
+    (
+        "symbol_minor_tight",
+        re.compile(rf"(?P<amount>[0-9][0-9,.]*)(?P<symbol>{_SYMBOL_PATTERN_MINOR})(?!\w)"),
+        "symbol",
+    ),
 ]
 
-_EXACTNESS_PATTERN = re.compile(
-    r"\b(" + "|".join(re.escape(m) for m in sorted(EXACTNESS_MARKERS, key=len, reverse=True)) + r")\b"
-)
+_EXACTNESS_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\b" + re.escape(marker) + r"\b"), exactness) for marker, exactness in EXACTNESS_MARKERS.items()
+]
 
 
 def _normalize_for_parsing(text: str) -> str:
@@ -330,8 +334,11 @@ def _extract_percentage(text: str) -> list[dict[str, Any]]:
 
 
 def _extract_exactness(text: str) -> str | None:
-    match = _EXACTNESS_PATTERN.search(text.lower())
-    return EXACTNESS_MARKERS[match.group(1)] if match else None
+    lower = text.lower()
+    for pattern, exactness in _EXACTNESS_PATTERNS:
+        if pattern.search(lower):
+            return exactness
+    return None
 
 
 def _extract_operators(text: str) -> list[str]:

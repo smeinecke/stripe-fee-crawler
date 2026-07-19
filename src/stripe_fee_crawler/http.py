@@ -80,6 +80,7 @@ class HttpResponse:
     from_cache: bool = False
     detected_market: str | None = None
     detected_locale: str | None = None
+    detected_currency: str | None = None
 
     def __post_init__(self) -> None:
         if self.content_sha256 is None and self.content:
@@ -322,6 +323,7 @@ class HttpClient:
                 headers={"content-type": "text/html"},
                 detected_market=detection.get("detected_market"),
                 detected_locale=detection.get("detected_locale"),
+                detected_currency=detection.get("detected_currency"),
             )
 
         self._validate_url(url)
@@ -399,6 +401,7 @@ class HttpClient:
             from_cache=from_cache or response.status_code == 304,
             detected_market=detection.get("detected_market"),
             detected_locale=detection.get("detected_locale"),
+            detected_currency=detection.get("detected_currency"),
         )
 
     async def get(

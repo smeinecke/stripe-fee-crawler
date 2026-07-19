@@ -87,10 +87,12 @@ def extract_page_source(response: Any) -> Source:
     effective_url = response.url
     detected_market = getattr(response, "detected_market", None)
     detected_locale = getattr(response, "detected_locale", None)
+    detected_currency = getattr(response, "detected_currency", None)
     if not detected_market:
         detection = detect_market(response.text, effective_url, page_title=page_title)
         detected_market = detection.get("detected_market")
         detected_locale = detection.get("detected_locale")
+        detected_currency = detection.get("detected_currency")
 
     return Source(
         requested_url=requested_url,
@@ -98,6 +100,7 @@ def extract_page_source(response: Any) -> Source:
         canonical_url=canonical_url,
         detected_market=detected_market,
         detected_locale=detected_locale,
+        detected_currency=detected_currency,
         page_id=page_id,
         page_title=page_title,
         source_updated_at=_extract_update_time(tree),
