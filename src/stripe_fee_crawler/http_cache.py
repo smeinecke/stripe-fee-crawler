@@ -385,22 +385,21 @@ class HttpCache:
             data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             logger.debug("Corrupt cache entry at %s; ignoring", path)
-            self.stats = self.stats.model_copy(update={"cache_errors": self.stats.cache_errors + 1})
             with contextlib.suppress(OSError):
                 path.unlink(missing_ok=True)
             return None
         entry = _CacheEntry.from_json(data)
         if entry is None:
             logger.debug("Stale or invalid cache entry at %s; ignoring", path)
-            self.stats = self.stats.model_copy(update={"cache_errors": self.stats.cache_errors + 1})
             with contextlib.suppress(OSError):
                 path.unlink(missing_ok=True)
             return None
         return entry
 
-    def _write_entry(self, entry: _CacheEntry) -> None:
+    def _write_entry(self, entry: _CacheEntry) -> bool:
+        """Write a cache entry to disk. Return True on success, False on failure."""
         if self._cache_dir is None:
-            return
+            return False
         path = self._entry_path(entry.key)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".tmp.{path.name}.{os.getpid()}.{time.monotonic_ns()}")
@@ -409,9 +408,10 @@ class HttpCache:
             os.replace(tmp, path)
         except Exception as exc:
             logger.warning("Failed to write cache entry %s: %s", path, exc)
-            self.stats = self.stats.model_copy(update={"cache_errors": self.stats.cache_errors + 1})
             with contextlib.suppress(OSError):
                 tmp.unlink(missing_ok=True)
+            return False
+        return True
 
     def _remove_entry(self, key: str) -> None:
         if self._cache_dir is None:
@@ -451,7 +451,7 @@ class HttpCache:
             request_headers["Accept-Language"] = locale
 
         async def _do_network(req_headers: dict[str, str], reval_headers: dict[str, str]) -> httpx.Response:
-            self.stats = self.stats.model_copy(update={"network_requests": self.stats.network_requests + 1})
+            self.stats.network_requests += 1
             return await network(req_headers, reval_headers)
 
         if method.upper() != "GET":
@@ -468,49 +468,48 @@ class HttpCache:
         async with self._key_lock(key):
             lock = self._file_lock(key)
             async with lock.acquire():
-                entry = self._read_entry(key)
+                cache_path = self._entry_path(key)
+                path_existed = cache_path.exists()
+                entry = await asyncio.to_thread(self._read_entry, key)
+                if entry is None and path_existed:
+                    self.stats.cache_errors += 1
 
                 if entry is not None and not self._is_market_match(entry, market, locale):
-                    logger.warning(
-                        "Cached response for %s served market %s/%s but requested %s/%s; invalidating",
-                        _normalize_url(url),
-                        entry.detected_market,
-                        entry.detected_locale,
-                        market,
-                        locale,
-                    )
-                    self._remove_entry(key)
+                    if logger.isEnabledFor(logging.WARNING):
+                        logger.warning(
+                            "Cached response for %s served market %s/%s but requested %s/%s; invalidating",
+                            _normalize_url(url),
+                            entry.detected_market,
+                            entry.detected_locale,
+                            market,
+                            locale,
+                        )
+                    await asyncio.to_thread(self._remove_entry, key)
                     entry = None
 
                 if entry is not None and not self._refresh and self._is_fresh(entry):
-                    self.stats = self.stats.model_copy(
-                        update={
-                            "cache_hits": self.stats.cache_hits + 1,
-                            "bytes_avoided": self.stats.bytes_avoided + len(entry.content),
-                        }
-                    )
-                    logger.debug("Cache hit for %s", _normalize_url(url))
+                    self.stats.cache_hits += 1
+                    self.stats.bytes_avoided += len(entry.content)
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Cache hit for %s", _normalize_url(url))
                     return entry.to_httpx_response(method), True
 
                 reval = self._revalidation_headers(entry)
                 if reval:
-                    self.stats = self.stats.model_copy(
-                        update={"cache_revalidations": self.stats.cache_revalidations + 1}
-                    )
-                    logger.debug("Cache revalidation for %s", _normalize_url(url))
+                    self.stats.cache_revalidations += 1
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug("Cache revalidation for %s", _normalize_url(url))
 
                 response = await _do_network(request_headers, reval)
 
                 if response.status_code == 304:
                     if entry is not None:
                         entry.fetched_at = time.time()
-                        self._write_entry(entry)
-                        self.stats = self.stats.model_copy(
-                            update={
-                                "cache_304_responses": self.stats.cache_304_responses + 1,
-                                "bytes_avoided": self.stats.bytes_avoided + len(entry.content),
-                            }
-                        )
+                        if not await asyncio.to_thread(self._write_entry, entry):
+                            self.stats.cache_errors += 1
+                        else:
+                            self.stats.cache_304_responses += 1
+                            self.stats.bytes_avoided += len(entry.content)
                         return entry.to_httpx_response(method), True
                     # No stored body for this 304; return the upstream response.
                     return response, False
@@ -521,8 +520,8 @@ class HttpCache:
                 # and any previously stored copy for the same resource is removed
                 # so it cannot be served again.
                 if "no-store" in directives or "private" in directives:
-                    self._remove_entry(key)
-                    self.stats = self.stats.model_copy(update={"cache_misses": self.stats.cache_misses + 1})
+                    await asyncio.to_thread(self._remove_entry, key)
+                    self.stats.cache_misses += 1
                     return response, False
 
                 if _is_valid_cacheable_response(response):
@@ -545,15 +544,13 @@ class HttpCache:
                         detected_locale=detection.get("detected_locale"),
                         cache_control=response.headers.get("cache-control"),
                     )
-                    self._write_entry(entry)
-                    self.stats = self.stats.model_copy(
-                        update={
-                            "cache_writes": self.stats.cache_writes + 1,
-                            "cache_misses": self.stats.cache_misses + 1,
-                        }
-                    )
+                    if await asyncio.to_thread(self._write_entry, entry):
+                        self.stats.cache_writes += 1
+                    else:
+                        self.stats.cache_errors += 1
+                    self.stats.cache_misses += 1
                     return response, False
 
                 # Not a cacheable 200; pass through without writing.
-                self.stats = self.stats.model_copy(update={"cache_misses": self.stats.cache_misses + 1})
+                self.stats.cache_misses += 1
                 return response, False

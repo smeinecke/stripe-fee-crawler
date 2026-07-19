@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 import sys
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -126,6 +128,31 @@ def _env_float(name: str, default: float) -> float:
         raise ConfigurationError(f"Invalid numeric value for {name}: {value!r}") from exc
 
 
+_COMMON_CRAWL_OPTIONS: list[Callable[[Callable[..., Any]], Callable[..., Any]]] = [
+    click.option("--max-workers", default=3, type=int),
+    click.option("--timeout", default=30.0, type=float),
+    click.option("--retries", default=3, type=int),
+    click.option("--request-delay", default=1.0, type=float),
+    click.option("--source-timestamp", default=None),
+    click.option("--cache-dir", type=click.Path(), help="Directory for the HTTP response cache."),
+    click.option("--cache-ttl-hours", type=float, help="Cache entry TTL in hours."),
+    click.option(
+        "--cache-policy",
+        type=click.Choice(["ttl", "http"]),
+        help="Cache freshness policy: ttl (default) or http.",
+    ),
+    click.option("--no-cache", is_flag=True, help="Bypass cache reads and writes."),
+    click.option("--refresh-cache", is_flag=True, help="Force network revalidation/update."),
+]
+
+
+def _crawl_options(f: Callable[..., Any]) -> Callable[..., Any]:
+    """Apply the common crawl/cache CLI options to a command."""
+    for option in _COMMON_CRAWL_OPTIONS:
+        f = option(f)
+    return f
+
+
 @main.command(name="discover-markets")
 @click.pass_context
 def discover_markets_cmd(ctx: click.Context) -> None:
@@ -145,18 +172,7 @@ async def _discover_markets(ctx: click.Context, config: CrawlConfiguration) -> N
 @click.option("--output-format", default="json", type=click.Choice(["json", "summary"]))
 @click.option("--fixture-pricing", type=click.Path(exists=True))
 @click.option("--fixture-lpm", type=click.Path(exists=True))
-@click.option("--max-workers", default=3, type=int)
-@click.option("--timeout", default=30.0, type=float)
-@click.option("--retries", default=3, type=int)
-@click.option("--request-delay", default=1.0, type=float)
-@click.option("--source-timestamp", default=None)
-@click.option("--cache-dir", type=click.Path(), help="Directory for the HTTP response cache.")
-@click.option("--cache-ttl-hours", type=float, help="Cache entry TTL in hours.")
-@click.option(
-    "--cache-policy", type=click.Choice(["ttl", "http"]), help="Cache freshness policy: ttl (default) or http."
-)
-@click.option("--no-cache", is_flag=True, help="Bypass cache reads and writes.")
-@click.option("--refresh-cache", is_flag=True, help="Force network revalidation/update.")
+@_crawl_options
 @click.pass_context
 def crawl_market_cmd(
     ctx: click.Context,
@@ -237,20 +253,9 @@ async def _crawl_market(
 @click.option("--atomic", is_flag=True, default=True)
 @click.option("--fail-on-regression", is_flag=True, default=False)
 @click.option("--market", "markets", multiple=True)
-@click.option("--max-workers", default=3, type=int)
-@click.option("--timeout", default=30.0, type=float)
-@click.option("--retries", default=3, type=int)
-@click.option("--request-delay", default=1.0, type=float)
-@click.option("--source-timestamp", default=None)
 @click.option("--allow-partial", is_flag=True)
 @click.option("--report", type=click.Path(), help="Write machine-readable JSON report to this path.")
-@click.option("--cache-dir", type=click.Path(), help="Directory for the HTTP response cache.")
-@click.option("--cache-ttl-hours", type=float, help="Cache entry TTL in hours.")
-@click.option(
-    "--cache-policy", type=click.Choice(["ttl", "http"]), help="Cache freshness policy: ttl (default) or http."
-)
-@click.option("--no-cache", is_flag=True, help="Bypass cache reads and writes.")
-@click.option("--refresh-cache", is_flag=True, help="Force network revalidation/update.")
+@_crawl_options
 @click.pass_context
 def crawl_cmd(
     ctx: click.Context,

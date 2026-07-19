@@ -408,7 +408,9 @@ def parse_fee_value(text: str) -> dict[str, Any]:
     tokens = tokenize_fee_text(text)
     percentages = [t for t in tokens if t.kind == "percentage"]
     amounts = [t for t in tokens if t.kind == "amount"]
-    exactness = _extract_exactness(text)
+    # Derive exactness and operators from the tokenized result to avoid
+    # re-parsing the same phrase.
+    exactness = next((t.exactness for t in tokens if t.exactness), None) or _extract_exactness(text)
     operators = _extract_operators(text)
     return {
         "percentage": percentages[0].percentage if percentages else None,

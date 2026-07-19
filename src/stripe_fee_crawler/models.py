@@ -17,6 +17,38 @@ def _require_string(value: Any) -> str:
     return value.strip()
 
 
+# Canonical allowed-value sets reused by multiple model validators.
+CLASSIFICATION_STATUSES: frozenset[str] = frozenset(
+    {
+        "classified",
+        "unclassified",
+        "non_calculable",
+        "partial",
+        "calculable_rule",
+        "reference_only",
+        "included",
+        "free",
+        "custom_pricing",
+        "informational",
+        "unsupported_fee_shape",
+        "unclassified_fee_candidate",
+        "ignored_non_fee",
+        "ambiguous",
+        "conflict",
+    }
+)
+
+EXACTNESS_VALUES: frozenset[str] = frozenset(
+    {"exact", "from", "range", "tiered", "included", "free", "custom", "non_calculable"}
+)
+
+DERIVATION_STATUSES: frozenset[str] = frozenset({"complete", "partial", "unclassified", "failed"})
+
+CALCULATOR_COVERAGE_STATUSES: frozenset[str] = frozenset(
+    {"complete", "partial", "unclassified", "failed", "not_calculable"}
+)
+
+
 class Language(BaseModel):
     """A supported language for a market."""
 
@@ -121,7 +153,7 @@ class Link(BaseModel):
 class CacheStats(BaseModel):
     """HTTP cache statistics for a crawl run."""
 
-    model_config = ConfigDict(extra="ignore", frozen=True)
+    model_config = ConfigDict(extra="ignore")
 
     cache_enabled: bool = False
     cache_dir: str | None = None
@@ -240,25 +272,8 @@ class PricingEntry(BaseModel):
     @field_validator("classification_status")
     @classmethod
     def _status_allowed(cls, value: str) -> str:
-        allowed = {
-            "classified",
-            "unclassified",
-            "non_calculable",
-            "partial",
-            "calculable_rule",
-            "reference_only",
-            "included",
-            "free",
-            "custom_pricing",
-            "informational",
-            "unsupported_fee_shape",
-            "unclassified_fee_candidate",
-            "ignored_non_fee",
-            "ambiguous",
-            "conflict",
-        }
-        if value not in allowed:
-            raise ValueError(f"classification_status must be one of {allowed}")
+        if value not in CLASSIFICATION_STATUSES:
+            raise ValueError(f"classification_status must be one of {CLASSIFICATION_STATUSES}")
         return value
 
     @field_validator("confidence")
@@ -380,9 +395,8 @@ class FeeRule(BaseModel):
     @field_validator("exactness")
     @classmethod
     def _exactness_allowed(cls, value: str) -> str:
-        allowed = {"exact", "from", "range", "tiered", "included", "free", "custom", "non_calculable"}
-        if value not in allowed:
-            raise ValueError(f"exactness must be one of {allowed}")
+        if value not in EXACTNESS_VALUES:
+            raise ValueError(f"exactness must be one of {EXACTNESS_VALUES}")
         return value
 
     @field_validator("unit")
@@ -420,25 +434,8 @@ class FeeRule(BaseModel):
     @field_validator("classification_status")
     @classmethod
     def _classification_status_allowed(cls, value: str) -> str:
-        allowed = {
-            "classified",
-            "unclassified",
-            "non_calculable",
-            "partial",
-            "calculable_rule",
-            "reference_only",
-            "included",
-            "free",
-            "custom_pricing",
-            "informational",
-            "unsupported_fee_shape",
-            "unclassified_fee_candidate",
-            "ignored_non_fee",
-            "ambiguous",
-            "conflict",
-        }
-        if value not in allowed:
-            raise ValueError(f"classification_status must be one of {allowed}")
+        if value not in CLASSIFICATION_STATUSES:
+            raise ValueError(f"classification_status must be one of {CLASSIFICATION_STATUSES}")
         return value
 
     @field_validator("confidence")
@@ -533,17 +530,15 @@ class MarketOutput(BaseModel):
     @field_validator("derivation_status")
     @classmethod
     def _derivation_status_allowed(cls, value: str) -> str:
-        allowed = {"complete", "partial", "unclassified", "failed"}
-        if value not in allowed:
-            raise ValueError(f"derivation_status must be one of {allowed}")
+        if value not in DERIVATION_STATUSES:
+            raise ValueError(f"derivation_status must be one of {DERIVATION_STATUSES}")
         return value
 
     @field_validator("calculator_coverage_status")
     @classmethod
     def _calculator_coverage_status_allowed(cls, value: str) -> str:
-        allowed = {"complete", "partial", "unclassified", "failed", "not_calculable"}
-        if value not in allowed:
-            raise ValueError(f"calculator_coverage_status must be one of {allowed}")
+        if value not in CALCULATOR_COVERAGE_STATUSES:
+            raise ValueError(f"calculator_coverage_status must be one of {CALCULATOR_COVERAGE_STATUSES}")
         return value
 
 
@@ -643,33 +638,15 @@ class CoreFeeRule(BaseModel):
     @field_validator("classification_status")
     @classmethod
     def _classification_status_allowed(cls, value: str) -> str:
-        allowed = {
-            "classified",
-            "unclassified",
-            "non_calculable",
-            "partial",
-            "calculable_rule",
-            "reference_only",
-            "included",
-            "free",
-            "custom_pricing",
-            "informational",
-            "unsupported_fee_shape",
-            "unclassified_fee_candidate",
-            "ignored_non_fee",
-            "ambiguous",
-            "conflict",
-        }
-        if value not in allowed:
-            raise ValueError(f"classification_status must be one of {allowed}")
+        if value not in CLASSIFICATION_STATUSES:
+            raise ValueError(f"classification_status must be one of {CLASSIFICATION_STATUSES}")
         return value
 
     @field_validator("exactness")
     @classmethod
     def _exactness_allowed(cls, value: str) -> str:
-        allowed = {"exact", "from", "range", "tiered", "included", "free", "custom", "non_calculable"}
-        if value not in allowed:
-            raise ValueError(f"exactness must be one of {allowed}")
+        if value not in EXACTNESS_VALUES:
+            raise ValueError(f"exactness must be one of {EXACTNESS_VALUES}")
         return value
 
 
@@ -698,17 +675,15 @@ class CoreFeeEntry(BaseModel):
     @field_validator("derivation_status")
     @classmethod
     def _derivation_status_allowed(cls, value: str) -> str:
-        allowed = {"complete", "partial", "unclassified", "failed"}
-        if value not in allowed:
-            raise ValueError(f"derivation_status must be one of {allowed}")
+        if value not in DERIVATION_STATUSES:
+            raise ValueError(f"derivation_status must be one of {DERIVATION_STATUSES}")
         return value
 
     @field_validator("calculator_coverage_status")
     @classmethod
     def _calculator_coverage_status_allowed(cls, value: str) -> str:
-        allowed = {"complete", "partial", "unclassified", "failed", "not_calculable"}
-        if value not in allowed:
-            raise ValueError(f"calculator_coverage_status must be one of {allowed}")
+        if value not in CALCULATOR_COVERAGE_STATUSES:
+            raise ValueError(f"calculator_coverage_status must be one of {CALCULATOR_COVERAGE_STATUSES}")
         return value
 
 

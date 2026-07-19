@@ -8,6 +8,7 @@ from typing import Any
 
 from lxml import html
 
+from ._common import _contains_market_share_evidence
 from .models import FeeToken, Section
 from .pricing_tokens import parse_fee_value, tokenize_fee_text
 from .rich_text import clean_fee_text, extract_links, extract_text
@@ -360,41 +361,25 @@ def extract_sections(html_text: str, base_url: str, page_kind: str = "pricing") 
     return _build_section_tree(tree, base_url)
 
 
-def _is_feeish_line(line: str) -> bool:
-    """Return True when a line contains a parseable fee or included/free statement."""
-    parsed = parse_fee_value(line)
+def _is_feeish_parsed(parsed: dict[str, Any]) -> bool:
+    """Return True when a parsed value contains a fee or included/free statement."""
     return bool(parsed["percentage"] or parsed["fixed_amount"] or parsed["exactness"] in {"included", "free"})
 
 
-_MARKET_SHARE_PHRASES = (
-    "share",
-    "market share",
-    "most popular payment method",
-    "used in more than",
-    "used by over",
-    "adoption",
-    "customers use",
-    "active monthly users",
-    "active global customers",
-)
+def _is_feeish_line(line: str) -> bool:
+    """Return True when a line contains a parseable fee or included/free statement."""
+    return _is_feeish_parsed(parse_fee_value(line))
 
 
-def _is_market_share_statistic(line: str) -> bool:
+def _is_market_share_statistic(parsed: dict[str, Any], line: str) -> bool:
     """Return True for lines where a percentage describes market share, not a fee."""
-    parsed = parse_fee_value(line)
-    if not parsed["percentage"]:
-        return False
-    lower = line.lower()
-    for phrase in _MARKET_SHARE_PHRASES:
-        if phrase in lower:
-            return True
-    # Broad pattern: "more than X% share / used in ..."
-    return bool(re.search(r"\b(more than|over)\s+[0-9]+%?\s*(share|of)\b", lower))
+    return bool(parsed["percentage"]) and _contains_market_share_evidence(line)
 
 
 def _is_trusted_feeish_line(line: str) -> bool:
     """Return True when a line is a genuine fee value, not a market-share statistic."""
-    return _is_feeish_line(line) and not _is_market_share_statistic(line)
+    parsed = parse_fee_value(line)
+    return _is_feeish_parsed(parsed) and not _is_market_share_statistic(parsed, line)
 
 
 def split_section_body_into_entries(section: Section) -> list[tuple[str, list[FeeToken]]]:
@@ -451,11 +436,11 @@ def split_section_body_into_entries(section: Section) -> list[tuple[str, list[Fe
         pending_suffix = None
 
     for line in lines:
-        is_feeish = _is_feeish_line(line)
-        is_trusted_feeish = is_feeish and not _is_market_share_statistic(line)
+        parsed = parse_fee_value(line)
+        is_feeish = _is_feeish_parsed(parsed)
+        is_trusted_feeish = is_feeish and not _is_market_share_statistic(parsed, line)
         is_label = bool(label_pattern.match(line)) and not is_feeish
         is_qualifier = bool(qualifier_pattern.match(line))
-        parsed = parse_fee_value(line)
         lower = line.lower()
         is_prefix_qualifier = (
             not is_feeish

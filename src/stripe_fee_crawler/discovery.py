@@ -23,7 +23,11 @@ from .exceptions import (
     UnsupportedMarketError,
 )
 from .http import HttpClient, HttpResponse
-from .market_detection import COUNTRY_NAME_TO_ISO, CURRENCY_BY_COUNTRY
+from .market_detection import (
+    COUNTRY_NAME_TO_ISO,
+    CURRENCY_BY_COUNTRY,
+    DIRECT_LOCALE_MARKETS,
+)
 from .models import CrawlConfiguration, Language, Market
 
 logger = logging.getLogger(__name__)
@@ -140,9 +144,6 @@ BOOTSTRAP_MARKETS: list[Market] = [
         status="pricing_page_unavailable",
     ),
 ]
-
-# Markets known to have a direct country URL without language prefix.
-DIRECT_LOCALE_MARKETS: set[str] = {"us", "gb", "au", "nz", "ie", "in", "ae"}
 
 
 def _country_name_to_iso(name: str) -> str | None:

@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import subprocess  # nosec B404
 from pathlib import Path
 from typing import Any
 
+from ._git import _crawler_revision
 from .classify import derive_market_fees
 from .discovery import (
     MarketDiscoveryError,
@@ -41,7 +41,6 @@ from .models import (
 )
 from .output import OutputPublisher
 from .regression import check_regression
-from .validation import validate_all_output
 
 logger = logging.getLogger(__name__)
 
@@ -54,40 +53,6 @@ def _load_fixture(path: str | None) -> str | None:
             return fh.read()
     except Exception:
         return None
-
-
-def _crawler_revision(crawler_dir: Path | None = None) -> str | None:
-    """Return the current crawler Git revision, or None if not available.
-
-    Prefers the supplied ``crawler_dir`` (the crawler submodule checkout in the
-    data repository) and falls back to the crawler source checkout root adjacent
-    to this file.
-    """
-    candidates: list[Path] = []
-    if crawler_dir is not None:
-        candidates.append(crawler_dir)
-    # Source layout: .../crawler/src/stripe_fee_crawler/crawler.py
-    candidates.append(Path(__file__).resolve().parents[3])
-
-    for candidate in candidates:
-        if not candidate.exists():
-            continue
-        result = None
-        try:
-            result = subprocess.run(  # nosec
-                ["git", "rev-parse", "HEAD"],
-                cwd=candidate,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
-        except Exception as exc:
-            logger.debug("Cannot read crawler revision from %s: %s", candidate, exc)
-        if result is not None:
-            rev = result.stdout.strip()
-            if rev:
-                return rev
-    return None
 
 
 class StripeCrawler:
@@ -163,41 +128,33 @@ class StripeCrawler:
             )
 
         # Crawl main pricing page.
-        try:
-            main_html, main_source = await self._fetch_page(pricing_url, market)
-            if main_html is not None and main_source is not None:
-                sources.append(main_source)
-                page_entries, page_sections = extract_pricing_entries(
-                    main_html, main_source.canonical_url or pricing_url, "pricing"
-                )
-                entries.extend(page_entries)
-                sections.extend(page_sections)
-        except Exception as exc:
-            warnings.append(
-                ParserWarning(
-                    code="pricing_page_extraction_failure",
-                    message=f"Failed to extract main pricing page for {market.account_country}: {exc}",
-                )
-            )
+        page_entries, page_sections, main_source = await self._crawl_page(
+            pricing_url,
+            market,
+            page_kind="pricing",
+            page_name="main pricing page",
+            warning_code="pricing_page_extraction_failure",
+            warnings=warnings,
+        )
+        if main_source is not None:
+            sources.append(main_source)
+            entries.extend(page_entries)
+            sections.extend(page_sections)
 
         # Crawl local payment methods page when available.
         if payment_methods_url and payment_methods_url != pricing_url:
-            try:
-                lpm_html, lpm_source = await self._fetch_page(payment_methods_url, market)
-                if lpm_html is not None and lpm_source is not None:
-                    sources.append(lpm_source)
-                    page_entries, page_sections = extract_pricing_entries(
-                        lpm_html, lpm_source.canonical_url or payment_methods_url, "local-payment-methods"
-                    )
-                    entries.extend(page_entries)
-                    sections.extend(page_sections)
-            except Exception as exc:
-                warnings.append(
-                    ParserWarning(
-                        code="payment_methods_extraction_failure",
-                        message=f"Failed to extract payment methods page for {market.account_country}: {exc}",
-                    )
-                )
+            page_entries, page_sections, lpm_source = await self._crawl_page(
+                payment_methods_url,
+                market,
+                page_kind="local-payment-methods",
+                page_name="payment methods page",
+                warning_code="payment_methods_extraction_failure",
+                warnings=warnings,
+            )
+            if lpm_source is not None:
+                sources.append(lpm_source)
+                entries.extend(page_entries)
+                sections.extend(page_sections)
 
         # Renumber entries with a globally stable, page-aware source order so that
         # main pricing and LPM pages do not reuse the same source_order values.
@@ -208,8 +165,8 @@ class StripeCrawler:
         )
         entries = [entry.model_copy(update={"source_order": idx}) for idx, entry in enumerate(ordered_entries)]
 
-        rules, unclassified, derivation_status, coverage_summary, calculator_coverage_status = derive_market_fees(
-            entries, market=market
+        rules, unclassified, derivation_status, coverage_summary, calculator_coverage_status = await asyncio.to_thread(
+            derive_market_fees, entries, market=market
         )
         timestamp = self.config.timestamp or self.config.source_timestamp_override
 
@@ -253,6 +210,37 @@ class StripeCrawler:
                 f"(effective_url={source.effective_url}, requested_url={source.requested_url})"
             )
         return response.text, source
+
+    async def _crawl_page(
+        self,
+        url: str,
+        market: Market,
+        *,
+        page_kind: str,
+        page_name: str,
+        warning_code: str,
+        warnings: list[ParserWarning],
+    ) -> tuple[list[Any], list[Any], Source | None]:
+        """Fetch and extract entries for a single page, recording warnings on failure."""
+        try:
+            html, source = await self._fetch_page(url, market)
+        except Exception as exc:
+            warnings.append(
+                ParserWarning(
+                    code=warning_code,
+                    message=f"Failed to extract {page_name} for {market.account_country}: {exc}",
+                )
+            )
+            return [], [], None
+        if html is None or source is None:
+            return [], [], None
+        page_entries, page_sections = await asyncio.to_thread(
+            extract_pricing_entries,
+            html,
+            source.canonical_url or url,
+            page_kind,
+        )
+        return page_entries, page_sections, source
 
     async def crawl_all(
         self, markets: list[Market] | None = None
@@ -345,7 +333,8 @@ class StripeCrawler:
             ]
 
             crawler_dir = Path(output_dir) / "crawler"
-            crawler_revision = _crawler_revision(crawler_dir if crawler_dir.exists() else None)
+            source_dir = Path(__file__).resolve().parents[3]
+            crawler_revision = _crawler_revision(crawler_dir, source_dir)
             _, staging = publisher.publish(
                 outputs,
                 discovered_markets,
@@ -385,11 +374,7 @@ class StripeCrawler:
             publisher.generate_readme(staging)
 
             coverage_summary = _aggregate_coverage(outputs)
-            if atomic:
-                changed, _ = publisher.commit(staging, validate=True)
-            else:
-                validate_all_output(staging, strict=True)
-                changed = _staging_changed(staging, old_dir)
+            changed, _ = publisher.commit(staging, validate=True)
 
             report = CrawlReport(
                 exit_code=0,
@@ -404,7 +389,7 @@ class StripeCrawler:
                 cache_stats=self.http_client.cache_stats,
                 coverage_summary=coverage_summary,
             )
-            _write_crawl_report(Path(output_dir), report)
+            publisher.write_crawl_report(Path(output_dir), report)
 
             return report
         except Exception:
@@ -422,20 +407,6 @@ class StripeCrawler:
         await self.close()
 
 
-def _staging_changed(staging_dir: Path, output_dir: Path) -> bool:
-    """Return True if any published file differs from the previous output."""
-    for subdir in ("json", "meta", "schemas"):
-        for src in (staging_dir / subdir).rglob("*"):
-            if not src.is_file():
-                continue
-            dst = output_dir / subdir / src.relative_to(staging_dir / subdir)
-            if not dst.exists():
-                return True
-            if not _files_equal(src, dst):
-                return True
-    return False
-
-
 def _aggregate_coverage(outputs: list[MarketOutput]) -> CoverageSummary:
     """Sum per-market coverage summaries into a crawl-level summary."""
     totals: dict[str, int] = {}
@@ -443,20 +414,3 @@ def _aggregate_coverage(outputs: list[MarketOutput]) -> CoverageSummary:
         for field, value in output.coverage_summary.model_dump().items():
             totals[field] = totals.get(field, 0) + int(value)
     return CoverageSummary(**totals)
-
-
-def _write_crawl_report(output_dir: Path, report: CrawlReport) -> None:
-    """Write the crawl execution report outside the atomic staging transaction."""
-    path = output_dir / "meta" / "crawl-report.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(report.model_dump(), indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _files_equal(a: Path, b: Path) -> bool:
-    if a.stat().st_size != b.stat().st_size:
-        return False
-    with open(a, "rb") as fa, open(b, "rb") as fb:
-        return fa.read() == fb.read()

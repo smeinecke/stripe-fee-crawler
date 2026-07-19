@@ -33,6 +33,7 @@ from .models import (
     UnsupportedMarket,
 )
 from .normalize import normalize_method_name
+from .payment_methods import _family_for_method
 from .validation import (
     generate_core_fees_schema,
     generate_index_schema,
@@ -57,10 +58,12 @@ def _serialize(obj: Any) -> str:
     return text.replace("\r\n", "\n") + "\n"
 
 
-def _write_json(path: Path, data: Any) -> None:
-    """Write deterministic JSON to a path."""
+def _write_json(path: Path, data: Any) -> str:
+    """Write deterministic JSON to a path and return the serialized text."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_serialize(data), encoding="utf-8")
+    text = _serialize(data)
+    path.write_text(text, encoding="utf-8")
+    return text
 
 
 def _is_same_file(path: Path, content: str) -> bool:
@@ -70,12 +73,9 @@ def _is_same_file(path: Path, content: str) -> bool:
     return path.read_text(encoding="utf-8") == content
 
 
-def _sha256_file(path: Path) -> str:
-    hasher = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(8192), b""):
-            hasher.update(chunk)
-    return hasher.hexdigest()
+def _sha256_text(text: str) -> str:
+    """Return the SHA-256 hex digest of ``text`` encoded as UTF-8."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 @dataclass
@@ -163,8 +163,8 @@ class OutputPublisher:
             file_name = f"{country}.json"
             path = staging / "json" / file_name
             data = output.model_dump()
-            _write_json(path, data)
-            content_hash = _sha256_file(path)
+            content = _write_json(path, data)
+            content_hash = _sha256_text(content)
             entries.append(
                 MarketIndexEntry(
                     account_country=country,
@@ -333,7 +333,7 @@ class OutputPublisher:
         """
         changed_files = self._list_changed_files(staging)
         changed = bool(set(changed_files) - self.IGNORED_CHANGED_PATHS)
-        if not changed_files and self._output_dir_exists_and_matches(staging):
+        if not changed_files and self.output_dir.exists():
             self.rollback(staging)
             return False, []
 
@@ -480,12 +480,6 @@ class OutputPublisher:
                         changed.append(str(rel))
         return sorted(set(changed))
 
-    def _output_dir_exists_and_matches(self, staging: Path) -> bool:
-        """Return whether the output directory exists and matches staging exactly."""
-        if not self.output_dir.exists():
-            return False
-        return not self._list_changed_files(staging)
-
     def rollback(self, staging: Path) -> None:
         """Clean up the staging directory on failure or when no change is published."""
         if staging.exists() and staging != self.output_dir and not self._is_managed_path(staging):
@@ -622,34 +616,3 @@ def _to_core_fee_rule(rule: FeeRule) -> CoreFeeRule:
         confidence=rule.confidence,
         fee_evidence=rule.fee_evidence,
     )
-
-
-def _family_for_method(method: str) -> str:
-    lower = method.lower()
-    if lower in {"card", "domestic_card", "international_card", "premium_card", "standard_card"}:
-        return "card"
-    if lower in {"sepa_direct_debit", "sepa_bank_transfer", "ach_direct_debit", "bacs_direct_debit"}:
-        return "bank_debit"
-    if lower in {
-        "ideal",
-        "wero",
-        "bancontact",
-        "eps",
-        "blik",
-        "przelewy24",
-        "swish",
-        "twint",
-        "pay_by_bank",
-        "mb_way",
-        "pix",
-        "upi",
-        "bizum",
-    }:
-        return "bank_redirect"
-    if lower in {"alipay", "wechat_pay", "mobilepay", "paypal", "revolut_pay", "amazon_pay", "satispay"}:
-        return "wallet"
-    if lower in {"klarna", "billie", "scalapay"}:
-        return "buy_now_pay_later"
-    if lower in {"multibanco"}:
-        return "cash_voucher"
-    return "other"
