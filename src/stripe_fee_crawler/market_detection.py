@@ -8,8 +8,30 @@ from urllib.parse import urlparse
 
 from lxml import html
 
+from .currencies import _CURRENCY_PATTERNS, CURRENCY_BY_COUNTRY
+
 # Country codes for which Stripe uses a direct (no language prefix) canonical URL.
 DIRECT_LOCALE_MARKETS = {"us", "gb", "au", "nz", "ie", "in", "ae"}
+
+_PRICING_PAGE_SIGNALS = [
+    "Standard pricing",
+    "Custom pricing",
+    "Pricing & Fees",
+    "Preise",
+    "Preise und Gebühren",
+    "Local payment methods",
+    "Domestic card",
+    "International card",
+    "per transaction",
+    "per successful",
+]
+
+
+def _has_pricing_structure(text: str) -> bool:
+    """Return True when ``text`` contains recognizable Stripe pricing signals."""
+    lower = text.lower()
+    return any(signal.lower() in lower for signal in _PRICING_PAGE_SIGNALS)
+
 
 COUNTRY_NAME_TO_ISO: dict[str, str] = {
     "australia": "AU",
@@ -60,55 +82,6 @@ COUNTRY_NAME_TO_ISO: dict[str, str] = {
     "united states": "US",
 }
 
-CURRENCY_BY_COUNTRY: dict[str, str] = {
-    "AU": "AUD",
-    "AT": "EUR",
-    "BE": "EUR",
-    "BR": "BRL",
-    "BG": "EUR",
-    "CA": "CAD",
-    "HR": "EUR",
-    "CY": "EUR",
-    "CZ": "CZK",
-    "DK": "DKK",
-    "EE": "EUR",
-    "FI": "EUR",
-    "FR": "EUR",
-    "DE": "EUR",
-    "GI": "GBP",
-    "GR": "EUR",
-    "HK": "HKD",
-    "HU": "HUF",
-    "IN": "INR",
-    "ID": "IDR",
-    "IE": "EUR",
-    "IT": "EUR",
-    "JP": "JPY",
-    "LV": "EUR",
-    "LI": "CHF",
-    "LT": "EUR",
-    "LU": "EUR",
-    "MY": "MYR",
-    "MT": "EUR",
-    "MX": "MXN",
-    "NL": "EUR",
-    "NZ": "NZD",
-    "NO": "NOK",
-    "PL": "PLN",
-    "PT": "EUR",
-    "RO": "RON",
-    "SG": "SGD",
-    "SK": "EUR",
-    "SI": "EUR",
-    "ES": "EUR",
-    "SE": "SEK",
-    "CH": "CHF",
-    "TH": "THB",
-    "AE": "AED",
-    "GB": "GBP",
-    "US": "USD",
-}
-
 
 # Map HTML lang values (e.g. "en-US" or "de-DE") to ISO-3166-1 alpha-2 country.
 # The country code is the part after the final hyphen.  Some pages use the
@@ -122,22 +95,6 @@ def _country_from_locale(locale: str | None) -> str | None:
     if "-" in locale:
         return locale.split("-")[-1].upper() or None
     return locale.upper() if len(locale) == 2 and locale.isalpha() else None
-
-
-# Currency symbols / prefixes that appear in Stripe pricing text.
-_CURRENCY_PATTERNS = [
-    (r"\b(?:US\$|\$)\s*\d", "USD"),
-    (r"\b€\s*\d", "EUR"),
-    (r"\b£\s*\d", "GBP"),
-    (r"\bA\$\s*\d", "AUD"),
-    (r"\bCA\$\s*\d", "CAD"),
-    (r"\bJP¥\s*\d", "JPY"),
-    (r"\b¥\s*\d", "JPY"),
-    (r"\bAED\s*\d", "AED"),
-    (r"\bINR\s*\d", "INR"),
-    (r"\bBRL\s*\d", "BRL"),
-    (r"\bIDR\s*[\d.]+", "IDR"),
-]
 
 
 def _detect_currency(text: str) -> str | None:

@@ -16,7 +16,7 @@ from ._util import (
     _is_explicit_fee_phrase,
     _is_tap_to_pay,
     _nearest_heading_line,
-    _text_has,
+    _text_has_lower,
 )
 from .tables import (
     _CARD_TIER_TABLE,
@@ -440,7 +440,7 @@ def _infer_product_id(entry: PricingEntry) -> str:
     method = _infer_payment_method(entry)
     if method:
         if method == "card":
-            if _infer_channel(entry) == "in_person" or _text_has(
+            if _infer_channel(entry) == "in_person" or _text_has_lower(
                 " ".join(p.lower() for p in entry.section_path), "terminal", "tap to pay", "in-person", "in person"
             ):
                 return "terminal"
@@ -460,7 +460,7 @@ def _infer_product_id(entry: PricingEntry) -> str:
     combined = path + " " + category + " " + text + " " + evidence
 
     for product, keywords in _PRODUCT_KEYWORDS:
-        if _text_has(combined, *keywords):
+        if _text_has_lower(combined, *keywords):
             return product
 
     text = entry.source_text.lower()
@@ -468,14 +468,16 @@ def _infer_product_id(entry: PricingEntry) -> str:
     # Generic payment processing is card-based; avoid treating generic
     # "payment methods" headings as card payments when no card or explicit
     # method token is present.
-    if "card" in combined or ("payment" in combined and not _text_has(combined, "payment methods", "payment method")):
+    if "card" in combined or (
+        "payment" in combined and not _text_has_lower(combined, "payment methods", "payment method")
+    ):
         return "payments"
     # Surcharges for regional payment-method groups (e.g. "South Korean payment
     # methods + 1.5% for international transactions") are payment fees even though
     # no individual method token is present.
     if _has_base_fee(entry) and "payment methods" in combined:
         return "payments"
-    if _text_has(combined, "ach"):
+    if _text_has_lower(combined, "ach"):
         return "ach_direct_debit"
     if "sepa" in combined:
         return "sepa_direct_debit"
@@ -558,9 +560,9 @@ def _infer_variant_id(entry: PricingEntry, product_id: str, account_country: str
 def _infer_exactness(parsed: dict[str, Any], phrase: str) -> str:
     exactness = parsed.get("exactness") or "exact"
     lower = phrase.lower()
-    if _text_has(lower, "contact sales", "custom quote"):
+    if _text_has_lower(lower, "contact sales", "custom quote"):
         return "custom"
-    if _text_has(lower, "starting at", "starting from", "starts at", "starts from"):
+    if _text_has_lower(lower, "starting at", "starting from", "starts at", "starts from"):
         return "from"
     if re.search(r"\b(?:capped at|cap at|cap|maximum|max)\b", lower):
         return "range"
@@ -568,13 +570,13 @@ def _infer_exactness(parsed: dict[str, Any], phrase: str) -> str:
         return "range"
     if re.search(r"\b(?:minimum|min)\b", lower):
         return "from"
-    if _text_has(lower, "included", "no additional fee"):
+    if _text_has_lower(lower, "included", "no additional fee"):
         return "included"
     if "free" in lower or "no fee" in lower:
         return "free"
     # Package/allotment pricing with overages cannot be represented as a
     # simple per-event fee, so keep it as a custom-quote row.
-    if _text_has(lower, "overages", "overage", "allotment", "volume pricing", "custom package"):
+    if _text_has_lower(lower, "overages", "overage", "allotment", "volume pricing", "custom package"):
         return "custom"
     # A concrete fee with "custom pricing" wording is an explicitly scoped paid
     # variant, not a custom-quote exactness.
@@ -699,10 +701,10 @@ def _infer_conditions(
         if payment_method:
             conditions.append(FeeCondition(dimension="payment_method_variant", value="wire"))
 
-    if product_id in {"smart_disputes", "disputes"} and _text_has(combined, "smart dispute", "smart disputes"):
+    if product_id in {"smart_disputes", "disputes"} and _text_has_lower(combined, "smart dispute", "smart disputes"):
         conditions.append(FeeCondition(dimension="feature_enabled", value="smart_disputes"))
 
-    if product_id == "adaptive_pricing" or _text_has(combined, "adaptive pricing"):
+    if product_id == "adaptive_pricing" or _text_has_lower(combined, "adaptive pricing"):
         if "customer" in combined and ("pay" in text or "present" in text or "bear" in text):
             conditions.append(FeeCondition(dimension="payer", value="customer"))
         if "conversion" in combined:

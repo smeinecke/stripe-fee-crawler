@@ -7,86 +7,13 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from .currencies import (
+    CURRENCY_CODES,
+    CURRENCY_SYMBOLS,
+    MINOR_CURRENCY_SYMBOLS,
+)
 from .models import FeeToken
 from .rich_text import clean_fee_text
-
-CURRENCY_SYMBOLS: dict[str, str] = {
-    "$": "USD",
-    "€": "EUR",
-    "£": "GBP",
-    "¥": "JPY",
-    "₹": "INR",
-    "A$": "AUD",
-    "C$": "CAD",
-    "HK$": "HKD",
-    "S$": "SGD",
-    "NZ$": "NZD",
-    "CHF": "CHF",
-    "R$": "BRL",
-    "MX$": "MXN",
-    "kr": "SEK",
-    "zł": "PLN",
-    "lei": "RON",
-    "฿": "THB",
-    "¢": "USD",
-    "p": "GBP",
-    "AED": "AED",
-    "DKK": "DKK",
-    "NOK": "NOK",
-}
-
-
-MINOR_CURRENCY_SYMBOLS: set[str] = {"¢", "p"}
-
-
-CURRENCY_CODES: set[str] = {
-    "USD",
-    "EUR",
-    "GBP",
-    "JPY",
-    "INR",
-    "AUD",
-    "CAD",
-    "HKD",
-    "SGD",
-    "NZD",
-    "CHF",
-    "BRL",
-    "MXN",
-    "SEK",
-    "PLN",
-    "RON",
-    "THB",
-    "AED",
-    "DKK",
-    "NOK",
-    "IDR",
-    "MYR",
-    "PHP",
-    "VND",
-    "KRW",
-    "CNY",
-    "ZAR",
-    "ILS",
-    "CZK",
-    "HUF",
-    "BGN",
-    "HRK",
-}
-
-# ISO 4217 currency exponents. Defaults to 2 when absent.
-CURRENCY_EXPONENTS: dict[str, int] = {
-    "JPY": 0,
-    "KRW": 0,
-    "VND": 0,
-    "BHD": 3,
-    "IQD": 3,
-    "JOD": 3,
-    "KWD": 3,
-    "OMR": 3,
-    "TND": 3,
-}
-
 
 EXACTNESS_MARKERS: dict[str, str] = {
     "from": "from",
@@ -209,11 +136,6 @@ def _to_basis_points(percentage: Decimal) -> str:
 
 def _currency_for_symbol(symbol: str) -> str | None:
     return CURRENCY_SYMBOLS.get(symbol)
-
-
-def currency_exponent(currency: str) -> int:
-    """Return the ISO 4217 exponent for a currency code."""
-    return CURRENCY_EXPONENTS.get(currency.upper(), 2)
 
 
 def _normalize_minor_amount(amount: Decimal, amount_text: str, symbol: str) -> tuple[Decimal, bool]:

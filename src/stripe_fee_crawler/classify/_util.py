@@ -8,8 +8,9 @@ from collections.abc import Iterable
 from decimal import Decimal
 from typing import Any
 
+from ..currencies import CURRENCY_CODES, CURRENCY_SYMBOLS, currency_exponent
 from ..models import PricingEntry
-from ..pricing_tokens import CURRENCY_CODES, CURRENCY_SYMBOLS, currency_exponent, parse_fee_value
+from ..pricing_tokens import parse_fee_value
 from .tables import _POSITIVE_FEE_TERMS, _Per_UNIT_NOUNS
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,11 @@ def _fixed_amount_minor(amount: str, currency: str) -> str | None:
 
 def _text_has(text: str, *terms: str) -> bool:
     lower = text.lower()
+    return any(term in lower for term in terms)
+
+
+def _text_has_lower(lower: str, *terms: str) -> bool:
+    """Variant for callers that have already lowercased the haystack."""
     return any(term in lower for term in terms)
 
 

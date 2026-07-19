@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .._common import _condition_key, _contains_market_share_evidence
+from ..currencies import CURRENCY_SYMBOLS, MINOR_CURRENCY_SYMBOLS, currency_exponent
 from ..exceptions import ValidationError as CrawlerValidationError
 from ..models import (
     CoreFeeRule,
@@ -18,7 +19,7 @@ from ..models import (
     MarketManifest,
     PaymentMethodCatalog,
 )
-from ..pricing_tokens import currency_exponent
+from ..pricing_tokens import _parse_decimal
 from .schemas import (
     validate_core_fees,
     validate_manifest,
@@ -37,8 +38,6 @@ _PUBLICATION_CONFIDENCE_THRESHOLD = 0.7
 
 def _currency_label_markers(currency: str) -> set[str]:
     """Return the currency code plus any known symbols for that currency."""
-    from ..pricing_tokens import CURRENCY_SYMBOLS
-
     markers = {currency.upper(), currency.lower()}
     for symbol, code in CURRENCY_SYMBOLS.items():
         if code.upper() == currency.upper():
@@ -49,10 +48,8 @@ def _currency_label_markers(currency: str) -> set[str]:
 
 def _minor_symbol_for_currency(currency: str) -> str | None:
     """Return the minor-currency symbol (e.g. 'p' for GBP, '¢' for USD)."""
-    from ..pricing_tokens import CURRENCY_SYMBOLS
-
-    for symbol, code in CURRENCY_SYMBOLS.items():
-        if code.upper() == currency.upper() and symbol in {"p", "¢"}:
+    for symbol in MINOR_CURRENCY_SYMBOLS:
+        if CURRENCY_SYMBOLS.get(symbol, "").upper() == currency.upper():
             return symbol
     return None
 
@@ -70,32 +67,14 @@ def _label_references_component(
     # Direct amount string match (e.g. "0.25" or "0,25").
     if amount in lower:
         return True
-    # Try parsing numeric tokens in the label and compare value.  Labels may
-    # use either comma or dot as the decimal separator and commas as thousands
-    # separators, so normalise carefully before comparing.
-    amount_dec = Decimal(amount) if re.match(r"^[0-9.,]+$", amount) else None
+    # Try parsing numeric tokens in the label and compare value, reusing the
+    # same localized-decimal parser used during extraction.
+    amount_dec = _parse_decimal(amount)
     if amount_dec is not None:
         for match in re.finditer(r"[0-9][0-9\s,.]*", lower):
-            candidate = match.group().replace(" ", "")
-            try:
-                if "," in candidate and "." in candidate:
-                    # e.g. "1,000.00" -> comma is a thousands separator.
-                    if Decimal(candidate.replace(",", "")) == amount_dec:
-                        return True
-                elif "," in candidate and "." not in candidate:
-                    # e.g. "0,25" -> comma is the decimal separator, or
-                    # "1,500" -> comma is a thousands separator.
-                    for normalised in (candidate.replace(",", "."), candidate.replace(",", "")):
-                        try:
-                            if Decimal(normalised) == amount_dec:
-                                return True
-                        except Exception:  # nosec B110
-                            pass
-                else:
-                    if Decimal(candidate) == amount_dec:
-                        return True
-            except Exception:  # nosec B110
-                pass
+            candidate_dec = _parse_decimal(match.group())
+            if candidate_dec is not None and candidate_dec == amount_dec:
+                return True
     # For minor-currency amounts the label may contain the raw minor text ("20p").
     minor_symbol = _minor_symbol_for_currency(currency) if currency else None
     if minor_symbol and minor_amount:
@@ -129,15 +108,13 @@ def _validate_component_currency_exponents(
 
 
 def _validate_rule_currency_exponents(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
-    if not _is_calculable_status(rule.classification_status):
-        return
+
     for comp in rule.fee_components:
         _validate_component_currency_exponents(rule, comp, market_code, errors)
 
 
 def _validate_rule_calculator_ready(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
-    if not _is_calculable_status(rule.classification_status):
-        return
+
     if not rule.channel:
         errors.append(f"{market_code}/{rule.rule_id}: classified rule missing channel")
     if not rule.unit:
@@ -246,8 +223,7 @@ def _validate_rule_contradictory_evidence(
     errors: list[str],
 ) -> None:
     """Reject calculable rules that mix positive-fee and included/free evidence."""
-    if not _is_calculable_status(rule.classification_status):
-        return
+
     if rule.fee_evidence and rule.fee_evidence.type == "contradictory_fee_evidence":
         errors.append(f"{market_code}/{rule.rule_id}: calculable rule has contradictory fee evidence")
         return
@@ -325,8 +301,7 @@ def _is_positive_component_source(text: str | None) -> bool:
 
 def _validate_rule_market_share_evidence(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
     """Reject calculable rules whose evidence includes market-share statistics."""
-    if not _is_calculable_status(rule.classification_status):
-        return
+
     combined = _rule_source_combined(rule)
     if not _contains_market_share_evidence(combined):
         return
@@ -351,8 +326,7 @@ def _validate_rule_cross_fragment_evidence(rule: CoreFeeRule, market_code: str, 
 
 def _validate_rule_pricing_plan(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
     """Every rule with a pricing-plan phrase must carry the matching condition."""
-    if not _is_calculable_status(rule.classification_status):
-        return
+
     combined = _rule_source_combined(rule)
     has_custom = "custom payments pricing" in combined or "custom pricing" in combined
     has_standard = "standard payments pricing" in combined or "standard pricing" in combined
@@ -369,8 +343,7 @@ def _validate_rule_pricing_plan(rule: CoreFeeRule, market_code: str, errors: lis
 
 def _validate_rule_add_on_identity(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
     """Add-on products must not be published as base payment-processing rules."""
-    if not _is_calculable_status(rule.classification_status):
-        return
+
     combined = _rule_source_combined(rule)
     if rule.product_id in _ADDON_PRODUCTS and rule.variant_id in _PAYMENTS_VARIANTS:
         errors.append(
@@ -393,8 +366,7 @@ def _validate_rule_add_on_identity(rule: CoreFeeRule, market_code: str, errors: 
 
 def _validate_rule_smart_disputes(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
     """Smart Disputes rules must require the Smart Disputes feature."""
-    if not _is_calculable_status(rule.classification_status):
-        return
+
     if rule.product_id != "smart_disputes":
         return
     cond_values = {c.dimension: c.value for c in rule.conditions}
@@ -408,8 +380,7 @@ def _validate_rule_smart_disputes(rule: CoreFeeRule, market_code: str, errors: l
 
 def _validate_rule_exactness_semantics(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
     """Starting-at / starting-from phrases must be published as exactness=from."""
-    if not _is_calculable_status(rule.classification_status):
-        return
+
     combined = _rule_source_combined(rule)
     if ("starting at" in combined or "starting from" in combined) and rule.exactness != "from":
         errors.append(
@@ -419,8 +390,7 @@ def _validate_rule_exactness_semantics(rule: CoreFeeRule, market_code: str, erro
 
 def _validate_rule_payer_condition(rule: CoreFeeRule, market_code: str, errors: list[str]) -> None:
     """Customer-paid conversion fees must carry a payer=customer condition."""
-    if not _is_calculable_status(rule.classification_status):
-        return
+
     combined = _rule_source_combined(rule)
     if "conversion fee" not in combined:
         return
@@ -553,16 +523,17 @@ def _validate_core_fees_semantic(
             )
         seen_identities: dict[tuple[str, str | None, Any], list[str]] = {}
         for rule in entry.rules:
-            _validate_rule_currency_exponents(rule, entry.stripe_market_code, errors)
-            _validate_rule_calculator_ready(rule, entry.stripe_market_code, errors)
-            _validate_rule_contradictory_evidence(rule, entry.stripe_market_code, errors)
-            _validate_rule_percentage_consistency(rule, entry.stripe_market_code, errors)
-            _validate_rule_pricing_plan(rule, entry.stripe_market_code, errors)
-            _validate_rule_add_on_identity(rule, entry.stripe_market_code, errors)
-            _validate_rule_smart_disputes(rule, entry.stripe_market_code, errors)
-            _validate_rule_exactness_semantics(rule, entry.stripe_market_code, errors)
-            _validate_rule_payer_condition(rule, entry.stripe_market_code, errors)
-            _validate_rule_market_share_evidence(rule, entry.stripe_market_code, errors)
+            if _is_calculable_status(rule.classification_status):
+                _validate_rule_currency_exponents(rule, entry.stripe_market_code, errors)
+                _validate_rule_calculator_ready(rule, entry.stripe_market_code, errors)
+                _validate_rule_contradictory_evidence(rule, entry.stripe_market_code, errors)
+                _validate_rule_percentage_consistency(rule, entry.stripe_market_code, errors)
+                _validate_rule_pricing_plan(rule, entry.stripe_market_code, errors)
+                _validate_rule_add_on_identity(rule, entry.stripe_market_code, errors)
+                _validate_rule_smart_disputes(rule, entry.stripe_market_code, errors)
+                _validate_rule_exactness_semantics(rule, entry.stripe_market_code, errors)
+                _validate_rule_payer_condition(rule, entry.stripe_market_code, errors)
+                _validate_rule_market_share_evidence(rule, entry.stripe_market_code, errors)
             _validate_rule_cross_fragment_evidence(rule, entry.stripe_market_code, errors)
             _validate_rule_product_identity(rule, entry.stripe_market_code, errors, method_by_display)
             _validate_rule_non_card_conditions(rule, entry.stripe_market_code, errors)

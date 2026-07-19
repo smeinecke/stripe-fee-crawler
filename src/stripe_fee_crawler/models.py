@@ -445,7 +445,14 @@ class FeeRule(BaseModel):
 
     @model_validator(mode="after")
     def _sync_legacy_fields(self) -> FeeRule:
-        """Keep legacy flat fields in sync with fee_components when possible."""
+        """Keep legacy flat fields in sync with fee_components when possible.
+
+        ``fee_components`` is the single source of truth for a rule's fee
+        shape. The flat ``percentage``, ``fixed_amount``, ``minimum_amount`` and
+        ``maximum_amount`` fields exist only as a deprecated published-schema
+        mirror and are derived from ``fee_components`` here so that legacy
+        consumers continue to work.
+        """
         if not self.fee_components:
             return self
         pct = next((c for c in self.fee_components if c.type == "percentage"), None)

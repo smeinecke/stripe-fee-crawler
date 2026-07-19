@@ -118,25 +118,11 @@ def _relative_change(before: Decimal, after: Decimal) -> float:
     return float((after - before) / before)
 
 
-def _detect_changes(old_dir: Path, new_dir: Path, thresholds: dict[str, Any] | None = None) -> list[ChangeType]:
+def _diff_market_set(old_dir: Path, new_dir: Path, thresholds: dict[str, Any]) -> list[ChangeType]:
+    """Detect added/removed markets and sharp market-set drops."""
     changes: list[ChangeType] = []
-    if thresholds is None:
-        thresholds = {
-            "section_drop_ratio": 0.5,
-            "entry_drop_ratio": 0.5,
-            "rule_drop_ratio": 0.5,
-            "market_drop_ratio": 0.2,
-            "percentage_change_ratio": 0.5,
-            "fixed_change_ratio": 0.5,
-        }
-
     old_markets = _market_set(old_dir)
     new_markets = _market_set(new_dir)
-    old_supported = _supported_set(old_dir)
-    new_supported = _supported_set(new_dir)
-    new_unsupported = _unsupported_set(new_dir)
-    new_transient = _transient_set(new_dir)
-
     removed = old_markets - new_markets
     added = new_markets - old_markets
 
@@ -166,7 +152,14 @@ def _detect_changes(old_dir: Path, new_dir: Path, thresholds: dict[str, Any] | N
                 message="Sharp drop in supported markets",
             )
         )
+    return changes
 
+
+def _diff_market_counts(old_dir: Path, new_dir: Path, thresholds: dict[str, Any]) -> list[ChangeType]:
+    """Detect sharp count drops and derivation-status regressions per market."""
+    changes: list[ChangeType] = []
+    old_markets = _market_set(old_dir)
+    new_markets = _market_set(new_dir)
     for country in sorted(old_markets & new_markets):
         old_data = _market_data(old_dir, country)
         new_data = _market_data(new_dir, country)
@@ -230,8 +223,17 @@ def _detect_changes(old_dir: Path, new_dir: Path, thresholds: dict[str, Any] | N
                     message=f"Derivation status for {country} regressed to unclassified",
                 )
             )
+    return changes
 
-        # Compare rule values for suspiciously large changes.
+
+def _diff_rule_values(old_dir: Path, new_dir: Path, thresholds: dict[str, Any]) -> list[ChangeType]:
+    """Detect large percentage/fixed-amount changes and currency changes for matching rules."""
+    changes: list[ChangeType] = []
+    old_markets = _market_set(old_dir)
+    new_markets = _market_set(new_dir)
+    for country in sorted(old_markets & new_markets):
+        old_data = _market_data(old_dir, country)
+        new_data = _market_data(new_dir, country)
         old_rules_by_id = {r.get("rule_id"): r for r in old_data.get("derived_rules", []) if r.get("rule_id")}
         new_rules_by_id = {r.get("rule_id"): r for r in new_data.get("derived_rules", []) if r.get("rule_id")}
         for rule_id in set(old_rules_by_id) & set(new_rules_by_id):
@@ -278,8 +280,14 @@ def _detect_changes(old_dir: Path, new_dir: Path, thresholds: dict[str, Any] | N
                         message=f"Currency for {rule_id} changed",
                     )
                 )
+    return changes
 
-        # Detect duplicate stable identifiers within the new dataset.
+
+def _diff_duplicate_identifiers(new_dir: Path) -> list[ChangeType]:
+    """Detect duplicate rule identifiers within the new dataset."""
+    changes: list[ChangeType] = []
+    for country in sorted(_market_set(new_dir)):
+        new_data = _market_data(new_dir, country)
         seen_ids: set[str] = set()
         for rule in new_data.get("derived_rules", []):
             rule_id = rule.get("rule_id")
@@ -293,8 +301,18 @@ def _detect_changes(old_dir: Path, new_dir: Path, thresholds: dict[str, Any] | N
                     )
                 )
             seen_ids.add(rule_id)
+    return changes
 
-    # Compare supported-to-unsupported/transient transitions.
+
+def _diff_state_transitions(old_dir: Path, new_dir: Path) -> list[ChangeType]:
+    """Detect supported markets moving to unsupported/transient or disappearing."""
+    changes: list[ChangeType] = []
+    old_supported = _supported_set(old_dir)
+    new_supported = _supported_set(new_dir)
+    new_markets = _market_set(new_dir)
+    new_unsupported = _unsupported_set(new_dir)
+    new_transient = _transient_set(new_dir)
+
     for code in sorted(old_supported - new_supported):
         if code in new_unsupported:
             changes.append(
@@ -320,8 +338,28 @@ def _detect_changes(old_dir: Path, new_dir: Path, thresholds: dict[str, Any] | N
                     message=f"{code} disappeared from the discovered market set",
                 )
             )
-
     return changes
+
+
+def _detect_changes(old_dir: Path, new_dir: Path, thresholds: dict[str, Any] | None = None) -> list[ChangeType]:
+    """Compare two published datasets and return a list of regression-style changes."""
+    if thresholds is None:
+        thresholds = {
+            "section_drop_ratio": 0.5,
+            "entry_drop_ratio": 0.5,
+            "rule_drop_ratio": 0.5,
+            "market_drop_ratio": 0.2,
+            "percentage_change_ratio": 0.5,
+            "fixed_change_ratio": 0.5,
+        }
+
+    return (
+        _diff_market_set(old_dir, new_dir, thresholds)
+        + _diff_market_counts(old_dir, new_dir, thresholds)
+        + _diff_rule_values(old_dir, new_dir, thresholds)
+        + _diff_duplicate_identifiers(new_dir)
+        + _diff_state_transitions(old_dir, new_dir)
+    )
 
 
 def check_regression(

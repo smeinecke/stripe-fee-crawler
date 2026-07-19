@@ -7,8 +7,9 @@ import re
 from decimal import Decimal
 from typing import Any
 
+from ..currencies import CURRENCY_CODES, CURRENCY_SYMBOLS
 from ..models import FeeComponent, FeeEvidence, PricingEntry
-from ..pricing_tokens import CURRENCY_CODES, CURRENCY_SYMBOLS, parse_fee_value
+from ..pricing_tokens import parse_fee_value
 from ._util import (
     _dedup_repeated_phrases,
     _is_explicit_fee_phrase,
@@ -16,6 +17,7 @@ from ._util import (
     _per_completion_noun,
     _source_text_for_group,
     _text_has,
+    _text_has_lower,
 )
 from .tables import (
     _CARD_NETWORK_TOKENS,
@@ -49,7 +51,7 @@ def _is_marketing_prose(text: str) -> bool:
 def _is_market_share_text(text: str) -> bool:
     """Return True when the text is a market-share/adoption statistic."""
     lower = text.lower()
-    if not _text_has(lower, *_MARKET_SHARE_STATISTICS):
+    if not _text_has_lower(lower, *_MARKET_SHARE_STATISTICS):
         return False
     # A statistic is only a false-positive fee if it actually contains a number.
     parsed = parse_fee_value(text)

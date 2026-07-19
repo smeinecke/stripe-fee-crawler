@@ -24,7 +24,7 @@ from .exceptions import (
     TransientNetworkError,
 )
 from .http_cache import HttpCache
-from .market_detection import detect_market
+from .market_detection import _has_pricing_structure, detect_market
 from .models import CacheStats, CrawlConfiguration
 
 logger = logging.getLogger(__name__)
@@ -206,18 +206,7 @@ class HttpClient:
     def _has_pricing_structure(self, tree: Any) -> bool:
         """Return True if the page contains recognizable pricing content."""
         text = " ".join(tree.itertext())
-        signals = [
-            "Standard pricing",
-            "Custom pricing",
-            "Pricing & Fees",
-            "Preise",
-            "Local payment methods",
-            "Domestic card",
-            "International card",
-            "per transaction",
-            "per successful",
-        ]
-        return any(signal.lower() in text.lower() for signal in signals)
+        return _has_pricing_structure(text)
 
     def _is_challenge_title(self, title: str) -> bool:
         lower = title.lower()

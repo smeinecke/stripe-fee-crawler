@@ -300,11 +300,11 @@ def _deduplicate_rules(rules: list[FeeRule]) -> list[FeeRule]:
     discarded.
     """
     # order preserves first-seen selector order; buckets map a selector to a
-    # list of rule groups, each group sharing one fee signature.
+    # list of (signature, rule group) pairs, each group sharing one fee signature.
     order: list[tuple[str, str | None, Any]] = []
     buckets: dict[
         tuple[str, str | None, Any],
-        list[list[FeeRule]],
+        list[tuple[tuple[Any, ...], list[FeeRule]]],
     ] = {}
 
     for rule in rules:
@@ -314,18 +314,18 @@ def _deduplicate_rules(rules: list[FeeRule]) -> list[FeeRule]:
             buckets[selector] = []
             order.append(selector)
         groups = buckets[selector]
-        for group in groups:
-            if _fee_signature(group[0]) == sig:
+        for group_sig, group in groups:
+            if group_sig == sig:
                 group.append(rule)
                 break
         else:
-            groups.append([rule])
+            groups.append((sig, [rule]))
 
     result: list[FeeRule] = []
     for selector in order:
         sig_groups = buckets[selector]
         # Merge within each signature group first.
-        merged_groups = [_merge_rules(g) for g in sig_groups]
+        merged_groups = [_merge_rules(g) for _, g in sig_groups]
 
         # A partial duplicate (e.g. a duplicate base row missing its cap) is a
         # subset of the same row that includes the modifier.  Absorb it so it

@@ -119,6 +119,7 @@ class OutputPublisher:
         self.output_dir = Path(output_dir)
         self.staging_dir = Path(staging_dir) if staging_dir else None
         self.timestamp = timestamp
+        self._changed_files_cache: dict[Path, list[str]] = {}
 
     def _make_staging(self) -> Path:
         if self.staging_dir and self.staging_dir.is_relative_to(self.output_dir):
@@ -441,6 +442,12 @@ class OutputPublisher:
 
     def _list_changed_files(self, staging: Path) -> list[str]:
         """Return relative paths of managed files that differ from published output."""
+        if staging not in self._changed_files_cache:
+            self._changed_files_cache[staging] = self._compute_changed_files(staging)
+        return self._changed_files_cache[staging]
+
+    def _compute_changed_files(self, staging: Path) -> list[str]:
+        """Compute the set of managed files that differ from the published output."""
         changed: list[str] = []
         for name in self.MANAGED_PATHS:
             src = staging / name
@@ -482,6 +489,7 @@ class OutputPublisher:
 
     def rollback(self, staging: Path) -> None:
         """Clean up the staging directory on failure or when no change is published."""
+        self._changed_files_cache.pop(staging, None)
         if staging.exists() and staging != self.output_dir and not self._is_managed_path(staging):
             shutil.rmtree(staging, ignore_errors=True)
 
@@ -554,7 +562,14 @@ class OutputPublisher:
 
 
 def _to_core_fee_components(rule: FeeRule) -> list[FeeComponent]:
-    """Build compact fee components from a FeeRule, falling back to legacy flat fields."""
+    """Build compact fee components from a FeeRule.
+
+    ``rule.fee_components`` is the single source of truth. The legacy flat
+    fields are a deprecated published-schema mirror that is kept in sync by
+    ``FeeRule._sync_legacy_fields``; the fallback here exists only for
+    backward compatibility with callers that may still create FeeRule objects
+    from flat fields.
+    """
     if rule.fee_components:
         return [
             FeeComponent(

@@ -17,6 +17,45 @@ from .rich_text import clean_fee_text, extract_text
 
 logger = logging.getLogger(__name__)
 
+# Payment-method substrings used during extraction. This list is intentionally
+# separate from payment_methods._PAYMENT_METHOD_TOKENS: changing the tokenization
+# here alters the generated fee data, so it is frozen as a module constant.
+_EXTRACT_PAYMENT_METHODS: tuple[str, ...] = (
+    "sepa direct debit",
+    "sepa bank transfer",
+    "ach direct debit",
+    "bacs direct debit",
+    "bancontact",
+    "bizum",
+    "blik",
+    "eps",
+    "ideal",
+    "wero",
+    "przelewy24",
+    "swish",
+    "twint",
+    "pay by bank",
+    "mb way",
+    "pix",
+    "upi",
+    "klarna",
+    "billie",
+    "scalapay",
+    "multibanco",
+    "alipay",
+    "mobilepay",
+    "paypal",
+    "revolut pay",
+    "wechat pay",
+    "amazon pay",
+    "satispay",
+    "konbini",
+    "tap to pay",
+    "link",
+    "card",
+    "terminal",
+)
+
 
 def _extract_page_title(tree: Any) -> str | None:
     title_node = tree.find(".//title")
@@ -196,41 +235,7 @@ def _infer_payment_method(section: Section, phrase: str) -> str | None:
     candidates = [phrase] + section.section_path
     for text in candidates:
         text = text.lower()
-        for method in [
-            "sepa direct debit",
-            "sepa bank transfer",
-            "ach direct debit",
-            "bacs direct debit",
-            "bancontact",
-            "bizum",
-            "blik",
-            "eps",
-            "ideal",
-            "wero",
-            "przelewy24",
-            "swish",
-            "twint",
-            "pay by bank",
-            "mb way",
-            "pix",
-            "upi",
-            "klarna",
-            "billie",
-            "scalapay",
-            "multibanco",
-            "alipay",
-            "mobilepay",
-            "paypal",
-            "revolut pay",
-            "wechat pay",
-            "amazon pay",
-            "satispay",
-            "konbini",
-            "tap to pay",
-            "link",
-            "card",
-            "terminal",
-        ]:
+        for method in _EXTRACT_PAYMENT_METHODS:
             if method in text:
                 return method.replace(" ", "_")
     return None

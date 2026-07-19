@@ -15,7 +15,7 @@ from ._util import (
     _is_explicit_fee_phrase,
     _is_unsupported_multi_per_shape,
     _ordered_unique,
-    _text_has,
+    _text_has_lower,
 )
 from .components import _build_components_for_entry, _is_modifier_entry
 from .dimensions import (
@@ -179,17 +179,14 @@ def _resolve_channel_and_unit(
     """Fill in missing channel and unit for well-understood products."""
     channel = base_item["channel"] or _infer_channel(base_entry)
     if not channel:
+        source_lower = base_entry.source_text.lower()
         if (
             product_id == "terminal"
             or payment_method == "tap_to_pay"
-            or _text_has(base_entry.source_text.lower(), "in-person", "in person", "tap to pay")
+            or _text_has_lower(source_lower, "in-person", "in person", "tap to pay")
         ):
             channel = "in_person"
-        elif (
-            payment_method
-            or product_id in _ONLINE_PRODUCT_IDS
-            or _text_has(base_entry.source_text.lower(), "card", "payment")
-        ):
+        elif payment_method or product_id in _ONLINE_PRODUCT_IDS or _text_has_lower(source_lower, "card", "payment"):
             channel = "online"
     if not unit:
         if product_id == "disputes":

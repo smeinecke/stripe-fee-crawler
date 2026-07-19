@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from lxml import html
 
+from .currencies import CURRENCY_BY_COUNTRY
 from .exceptions import (
     AccessChallengeError,
     ContentSecurityError,
@@ -23,11 +24,7 @@ from .exceptions import (
     UnsupportedMarketError,
 )
 from .http import HttpClient, HttpResponse
-from .market_detection import (
-    COUNTRY_NAME_TO_ISO,
-    CURRENCY_BY_COUNTRY,
-    DIRECT_LOCALE_MARKETS,
-)
+from .market_detection import COUNTRY_NAME_TO_ISO, DIRECT_LOCALE_MARKETS, _has_pricing_structure
 from .models import CrawlConfiguration, Language, Market
 
 logger = logging.getLogger(__name__)
@@ -328,16 +325,7 @@ def _is_pricing_page(response: HttpResponse, tree: Any | None = None) -> bool:
             return False
 
     text = " ".join(tree.itertext())
-    pricing_signals = [
-        "Standard pricing",
-        "Custom pricing",
-        "Pricing & Fees",
-        "Preise und Gebühren",
-        "Local payment methods",
-        "Domestic card",
-        "International card",
-    ]
-    if not any(signal.lower() in text.lower() for signal in pricing_signals):
+    if not _has_pricing_structure(text):
         return False
 
     requested_locale = _page_locale_from_url(response.url)
