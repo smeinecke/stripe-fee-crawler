@@ -815,6 +815,10 @@ def _entry_component_hint(entry: PricingEntry) -> str:
     tokens = entry.tokens or parsed.get("tokens") or []
     is_single_surcharge_token = len(tokens) == 1 and tokens[0].operator == "+" and not _is_tap_to_pay(entry)
     if (entry.source_text.strip().startswith("+") or is_single_surcharge_token) and not _is_tap_to_pay(entry):
+        # A promotional or scheduled rate (e.g. "Promotional rate through January 1,
+        # 2027; + 0.2% thereafter") is itself a base fee, not a modifier on another fee.
+        if re.search(r"\bpromotional\b", lower) or re.search(r"\bthrough\b.*\b20\d{2}\b.*\bthereafter\b", lower):
+            return "base"
         return "surcharge"
     return "base"
 
